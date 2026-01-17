@@ -1,0 +1,846 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Silk - Audio Visualizer</title>
+  <link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@300;400;500;600&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --e-global-color-primary: #FFFFFF;
+      --e-global-color-accent: #EB0F66;
+      --e-global-color-f0100b1: #020203;
+      --e-global-color-bbfff38: #5728E1;
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { 
+      background: var(--e-global-color-f0100b1); 
+      overflow: hidden; 
+      font-family: 'Rajdhani', sans-serif; 
+      color: #fff; 
+    }
+    
+    /* Video container - like Resonation */
+    .video-container {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100vw;
+      height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+    }
+    
+    .silk-video {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      transition: filter 0.1s ease, transform 0.15s ease;
+    }
+    
+    /* UI Overlay */
+    .ui-overlay { 
+      position: fixed; 
+      top: 0; 
+      left: 0; 
+      width: 100%; 
+      height: 100%; 
+      pointer-events: none; 
+      z-index: 10; 
+    }
+    .ui-overlay > * { pointer-events: auto; }
+    
+    /* Upload container */
+    .upload-container { 
+      position: absolute; 
+      top: 50%; 
+      left: 50%; 
+      transform: translate(-50%, -50%); 
+      z-index: 20; 
+    }
+    .upload-btn { 
+      display: flex; 
+      flex-direction: column; 
+      align-items: center; 
+      gap: 12px; 
+      padding: 40px 60px; 
+      background: rgba(255,255,255,0.03); 
+      border: 1px solid rgba(255,255,255,0.15); 
+      border-radius: 8px; 
+      cursor: pointer; 
+      color: #fff; 
+      transition: all 0.3s; 
+    }
+    .upload-btn:hover { 
+      background: rgba(255,255,255,0.06); 
+      border-color: rgba(255,255,255,0.3); 
+    }
+    .upload-btn span { 
+      font-size: 12px; 
+      opacity: 0.6; 
+      text-transform: uppercase; 
+      letter-spacing: 3px; 
+    }
+    
+    /* Controls */
+    .controls-container { 
+      position: absolute; 
+      bottom: 30px; 
+      left: 50%; 
+      transform: translateX(-50%); 
+      display: flex; 
+      align-items: center; 
+      gap: 16px; 
+      padding: 12px 24px; 
+      background: rgba(2,2,3,0.8); 
+      backdrop-filter: blur(20px); 
+      border-radius: 30px; 
+      border: 1px solid rgba(255,255,255,0.1); 
+    }
+    .control-btn { 
+      width: 36px; 
+      height: 36px; 
+      display: flex; 
+      align-items: center; 
+      justify-content: center; 
+      background: transparent; 
+      border: 1px solid rgba(255,255,255,0.2); 
+      border-radius: 50%; 
+      color: #fff; 
+      cursor: pointer; 
+      transition: all 0.2s; 
+    }
+    .control-btn:hover { 
+      background: rgba(255,255,255,0.1); 
+      border-color: rgba(255,255,255,0.4); 
+    }
+    .time-display { 
+      font-size: 11px; 
+      opacity: 0.5; 
+      min-width: 80px; 
+      text-align: center; 
+      letter-spacing: 1px; 
+    }
+    .seek-bar { 
+      width: 180px; 
+      height: 3px; 
+      -webkit-appearance: none; 
+      appearance: none; 
+      background: rgba(255,255,255,0.15); 
+      border-radius: 2px; 
+    }
+    .seek-bar::-webkit-slider-thumb { 
+      -webkit-appearance: none; 
+      appearance: none; 
+      width: 10px; 
+      height: 10px; 
+      background: #fff; 
+      border-radius: 50%; 
+      cursor: pointer; 
+    }
+    
+    /* Customizer panel */
+    .customizer { 
+      position: absolute; 
+      top: 20px; 
+      right: 20px; 
+      width: 200px; 
+      padding: 20px; 
+      background: rgba(2,2,3,0.85); 
+      backdrop-filter: blur(20px); 
+      border-radius: 8px; 
+      border: 1px solid rgba(255,255,255,0.08); 
+    }
+    .customizer-header { 
+      display: flex; 
+      justify-content: space-between; 
+      align-items: center; 
+      margin-bottom: 20px; 
+    }
+    .customizer-header span { 
+      font-size: 10px; 
+      letter-spacing: 3px; 
+      opacity: 0.4; 
+    }
+    .btn { 
+      padding: 6px 14px; 
+      font-size: 10px; 
+      background: rgba(255,255,255,0.08); 
+      border: 1px solid rgba(255,255,255,0.15); 
+      border-radius: 4px; 
+      color: #fff; 
+      cursor: pointer; 
+      letter-spacing: 1px; 
+      transition: all 0.2s; 
+    }
+    .btn:hover { background: rgba(255,255,255,0.15); }
+    
+    .color-group { margin-bottom: 20px; }
+    .color-group label { 
+      display: block; 
+      font-size: 11px; 
+      margin-bottom: 12px; 
+      opacity: 0.6; 
+      letter-spacing: 1px; 
+    }
+    .slider-row { 
+      display: flex; 
+      align-items: center; 
+      gap: 12px; 
+      margin-bottom: 8px; 
+    }
+    .slider-row span { 
+      font-size: 10px; 
+      opacity: 0.35; 
+      width: 14px; 
+    }
+    .slider-row input { 
+      flex: 1; 
+      height: 3px; 
+      -webkit-appearance: none; 
+      appearance: none; 
+      background: rgba(255,255,255,0.12); 
+      border-radius: 2px; 
+    }
+    .slider-row input::-webkit-slider-thumb { 
+      -webkit-appearance: none; 
+      appearance: none; 
+      width: 8px; 
+      height: 8px; 
+      background: #fff; 
+      border-radius: 50%; 
+      cursor: pointer; 
+    }
+    
+    .checkbox-row { 
+      display: flex; 
+      align-items: center; 
+      gap: 10px; 
+      margin: 16px 0; 
+    }
+    .checkbox-row input { 
+      width: 14px; 
+      height: 14px; 
+      accent-color: var(--e-global-color-bbfff38); 
+    }
+    .checkbox-row label { font-size: 11px; opacity: 0.6; }
+    
+    .download-section { 
+      margin-top: 20px; 
+      padding-top: 20px; 
+      border-top: 1px solid rgba(255,255,255,0.08); 
+    }
+    .download-btn { 
+      width: 100%; 
+      padding: 12px; 
+      font-size: 10px; 
+      background: linear-gradient(135deg, var(--e-global-color-bbfff38) 0%, var(--e-global-color-accent) 100%); 
+      border: none; 
+      border-radius: 4px; 
+      color: #fff; 
+      cursor: pointer; 
+      display: flex; 
+      align-items: center; 
+      justify-content: center; 
+      gap: 8px; 
+      letter-spacing: 1px; 
+      transition: opacity 0.2s; 
+    }
+    .download-btn:hover { opacity: 0.9; }
+    .download-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+    
+    .recording-indicator { 
+      position: fixed; 
+      top: 20px; 
+      left: 20px; 
+      padding: 8px 16px; 
+      background: rgba(235,15,102,0.9); 
+      border-radius: 20px; 
+      display: none; 
+      align-items: center; 
+      gap: 8px; 
+      z-index: 100; 
+      font-size: 11px; 
+      letter-spacing: 1px; 
+    }
+    .recording-dot { 
+      width: 8px; 
+      height: 8px; 
+      background: #fff; 
+      border-radius: 50%; 
+      animation: blink 1s infinite; 
+    }
+    @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+    
+    .error-message { 
+      position: fixed; 
+      top: 20px; 
+      left: 50%; 
+      transform: translateX(-50%); 
+      padding: 12px 24px; 
+      background: rgba(235,15,102,0.9); 
+      border-radius: 4px; 
+      font-size: 12px; 
+      z-index: 100; 
+    }
+  </style>
+</head>
+<body>
+  <!-- Silk Video Background -->
+  <div class="video-container">
+    <video id="silkVideo" class="silk-video" autoplay loop muted playsinline>
+      <source src="https://resonation.io/wp-content/uploads/2022/02/SL_HERO-FADE-80.mp4" type="video/mp4">
+    </video>
+  </div>
+  
+  <div class="recording-indicator" id="recordingIndicator">
+    <div class="recording-dot"></div>
+    <span>RECORDING</span>
+  </div>
+  
+  <div class="ui-overlay">
+    <div class="upload-container" id="uploadContainer">
+      <label class="upload-btn" for="audioFile">
+        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" opacity="0.6">
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+          <polyline points="17 8 12 3 7 8"/>
+          <line x1="12" y1="3" x2="12" y2="15"/>
+        </svg>
+        <span>Upload Audio</span>
+      </label>
+      <input type="file" id="audioFile" accept=".mp3,.wav,.ogg,.m4a,audio/*" hidden>
+    </div>
+    
+    <div class="controls-container" id="controlsContainer" style="display:none;">
+      <button class="control-btn" id="playPauseBtn">
+        <svg id="playIcon" width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+          <polygon points="5 3 19 12 5 21"/>
+        </svg>
+        <svg id="pauseIcon" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="display:none;">
+          <rect x="6" y="4" width="4" height="16"/>
+          <rect x="14" y="4" width="4" height="16"/>
+        </svg>
+      </button>
+      <div class="time-display">
+        <span id="currentTime">0:00</span> / <span id="duration">0:00</span>
+      </div>
+      <input type="range" id="seekBar" class="seek-bar" min="0" max="100" value="0">
+    </div>
+    
+    <div class="customizer">
+      <div class="customizer-header">
+        <span>CUSTOMIZER</span>
+        <button class="btn" id="randomizeBtn">Randomize</button>
+      </div>
+      <div class="color-group">
+        <label>Color Filter</label>
+        <div class="slider-row">
+          <span>H</span>
+          <input type="range" id="hueRotate" min="0" max="360" value="0">
+        </div>
+        <div class="slider-row">
+          <span>S</span>
+          <input type="range" id="saturate" min="50" max="200" value="100">
+        </div>
+        <div class="slider-row">
+          <span>B</span>
+          <input type="range" id="brightness" min="50" max="150" value="100">
+        </div>
+      </div>
+      <div class="checkbox-row">
+        <input type="checkbox" id="autoColor">
+        <label for="autoColor">Auto Color Change</label>
+      </div>
+      <div class="slider-row">
+        <span>⏱</span>
+        <input type="range" id="colorSpeed" min="1" max="10" value="3">
+        <span style="width:auto;opacity:0.4" id="speedLabel">3s</span>
+      </div>
+      <div class="download-section">
+        <button class="download-btn" id="downloadBtn" disabled>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+            <polyline points="7 10 12 15 17 10"/>
+            <line x1="12" y1="15" x2="12" y2="3"/>
+          </svg>
+          DOWNLOAD VIDEO
+        </button>
+      </div>
+    </div>
+  </div>
+  
+  <div class="error-message" id="errorMessage" style="display:none;"></div>
+
+  <script>
+class AudioAnalyzer {
+  constructor() {
+    this.ctx = null;
+    this.analyser = null;
+    this.source = null;
+    this.dataArray = null;
+    this.audio = new Audio();
+    this.isPlaying = false;
+    this.beatThreshold = 1.2;
+    this.lastBeatTime = 0;
+    this.bassHistory = [];
+    this.historySize = 30;
+  }
+  
+  async loadFile(file) {
+    return new Promise((resolve, reject) => {
+      const url = URL.createObjectURL(file);
+      this.audio.src = url;
+      this.audio.onloadedmetadata = () => {
+        if (!this.ctx) {
+          this.ctx = new (window.AudioContext || window.webkitAudioContext)();
+          this.analyser = this.ctx.createAnalyser();
+          this.analyser.fftSize = 512;
+          this.analyser.smoothingTimeConstant = 0.85;
+          this.source = this.ctx.createMediaElementSource(this.audio);
+          this.source.connect(this.analyser);
+          this.analyser.connect(this.ctx.destination);
+        }
+        this.dataArray = new Uint8Array(this.analyser.frequencyBinCount);
+        resolve();
+      };
+      this.audio.onerror = reject;
+    });
+  }
+  
+  play() {
+    if (this.ctx?.state === 'suspended') this.ctx.resume();
+    this.audio.play();
+    this.isPlaying = true;
+  }
+  
+  pause() {
+    this.audio.pause();
+    this.isPlaying = false;
+  }
+  
+  toggle() {
+    this.isPlaying ? this.pause() : this.play();
+  }
+  
+  seek(t) {
+    this.audio.currentTime = t;
+  }
+  
+  get currentTime() { return this.audio.currentTime; }
+  get duration() { return this.audio.duration || 0; }
+  
+  getFrequencyData() {
+    if (!this.analyser || !this.dataArray) {
+      return { bass: 0, mids: 0, highs: 0, amplitude: 0, beat: false };
+    }
+    
+    this.analyser.getByteFrequencyData(this.dataArray);
+    const len = this.dataArray.length;
+    let bass = 0, mids = 0, highs = 0, total = 0;
+    
+    for (let i = 0; i < len; i++) {
+      const v = this.dataArray[i];
+      total += v;
+      if (i < len * 0.15) bass += v;
+      else if (i < len * 0.5) mids += v;
+      else highs += v;
+    }
+    
+    bass /= (len * 0.15 * 255);
+    mids /= (len * 0.35 * 255);
+    highs /= (len * 0.5 * 255);
+    const amplitude = total / (len * 255);
+    
+    this.bassHistory.push(bass);
+    if (this.bassHistory.length > this.historySize) this.bassHistory.shift();
+    const avgBass = this.bassHistory.reduce((a, b) => a + b, 0) / this.bassHistory.length;
+    
+    const now = performance.now();
+    const beat = bass > avgBass * this.beatThreshold && now - this.lastBeatTime > 150;
+    if (beat) this.lastBeatTime = now;
+    
+    return { bass, mids, highs, amplitude, beat };
+  }
+}
+
+class SilkVisualizer {
+  constructor(videoElement) {
+    this.video = videoElement;
+    this.hue = 0;
+    this.saturation = 100;
+    this.brightness = 100;
+    this.targetHue = 0;
+    this.targetSat = 100;
+    this.targetBright = 100;
+    this.autoColor = false;
+    this.colorSpeed = 3;
+    this.lastColorChange = 0;
+    this.time = 0;
+    this.impulse = 0;
+    this.audioData = { bass: 0, mids: 0, highs: 0, amplitude: 0, beat: false };
+  }
+  
+  setAudioData(data) {
+    this.audioData = data;
+    if (data.beat) this.impulse = 1;
+  }
+  
+  setHue(h) { this.targetHue = h; }
+  setSaturation(s) { this.targetSat = s; }
+  setBrightness(b) { this.targetBright = b; }
+  setAutoColor(enabled) { this.autoColor = enabled; }
+  setColorSpeed(s) { this.colorSpeed = s; }
+  
+  randomizeColor() {
+    this.targetHue = Math.random() * 360;
+    this.targetSat = 80 + Math.random() * 70;
+    this.targetBright = 90 + Math.random() * 30;
+  }
+  
+  update(dt) {
+    this.time += dt;
+    
+    // Smooth color transitions using lerp
+    const lerpSpeed = 0.03;
+    this.hue += (this.targetHue - this.hue) * lerpSpeed;
+    this.saturation += (this.targetSat - this.saturation) * lerpSpeed;
+    this.brightness += (this.targetBright - this.targetBright) * lerpSpeed;
+    
+    // Auto color change with smooth transition
+    if (this.autoColor && this.time - this.lastColorChange > this.colorSpeed) {
+      this.targetHue = Math.random() * 360;
+      this.targetSat = 80 + Math.random() * 70;
+      this.lastColorChange = this.time;
+    }
+    
+    // Decay impulse smoothly
+    this.impulse *= 0.9;
+    
+    // Audio reactive effects
+    const { bass, mids, amplitude, beat } = this.audioData;
+    
+    // Scale based on bass
+    const scale = 1 + bass * 0.15 + this.impulse * 0.1;
+    
+    // Brightness pulse on beat
+    const brightPulse = this.impulse * 30;
+    
+    // Saturation boost with mids
+    const satBoost = mids * 50;
+    
+    // Apply CSS filters and transform
+    const finalBrightness = this.brightness + brightPulse + amplitude * 20;
+    const finalSaturation = this.saturation + satBoost;
+    
+    this.video.style.filter = `
+      hue-rotate(${this.hue}deg) 
+      saturate(${finalSaturation}%) 
+      brightness(${finalBrightness}%)
+    `;
+    
+    this.video.style.transform = `scale(${scale})`;
+  }
+}
+
+// Main App
+const silkVideo = document.getElementById('silkVideo');
+const visualizer = new SilkVisualizer(silkVideo);
+const audio = new AudioAnalyzer();
+
+// DOM elements
+const uploadContainer = document.getElementById('uploadContainer');
+const controlsContainer = document.getElementById('controlsContainer');
+const audioFile = document.getElementById('audioFile');
+const playPauseBtn = document.getElementById('playPauseBtn');
+const playIcon = document.getElementById('playIcon');
+const pauseIcon = document.getElementById('pauseIcon');
+const currentTimeEl = document.getElementById('currentTime');
+const durationEl = document.getElementById('duration');
+const seekBar = document.getElementById('seekBar');
+const hueRotate = document.getElementById('hueRotate');
+const saturate = document.getElementById('saturate');
+const brightness = document.getElementById('brightness');
+const autoColorCheck = document.getElementById('autoColor');
+const colorSpeedSlider = document.getElementById('colorSpeed');
+const speedLabel = document.getElementById('speedLabel');
+const randomizeBtn = document.getElementById('randomizeBtn');
+const downloadBtn = document.getElementById('downloadBtn');
+const recordingIndicator = document.getElementById('recordingIndicator');
+const errorMessage = document.getElementById('errorMessage');
+
+function formatTime(s) {
+  if (isNaN(s)) return '0:00';
+  const m = Math.floor(s / 60);
+  const sec = Math.floor(s % 60);
+  return `${m}:${sec.toString().padStart(2, '0')}`;
+}
+
+function showError(msg) {
+  errorMessage.textContent = msg;
+  errorMessage.style.display = 'block';
+  setTimeout(() => errorMessage.style.display = 'none', 4000);
+}
+
+function updatePlayPauseIcon() {
+  playIcon.style.display = audio.isPlaying ? 'none' : 'block';
+  pauseIcon.style.display = audio.isPlaying ? 'block' : 'none';
+}
+
+audioFile.addEventListener('change', async (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  try {
+    await audio.loadFile(file);
+    uploadContainer.style.display = 'none';
+    controlsContainer.style.display = 'flex';
+    downloadBtn.disabled = false;
+    durationEl.textContent = formatTime(audio.duration);
+    audio.play();
+    updatePlayPauseIcon();
+  } catch (err) {
+    showError('Failed to load audio file');
+  }
+});
+
+playPauseBtn.addEventListener('click', () => {
+  audio.toggle();
+  updatePlayPauseIcon();
+});
+
+seekBar.addEventListener('input', () => {
+  const t = (seekBar.value / 100) * audio.duration;
+  audio.seek(t);
+});
+
+hueRotate.addEventListener('input', () => visualizer.setHue(parseFloat(hueRotate.value)));
+saturate.addEventListener('input', () => visualizer.setSaturation(parseFloat(saturate.value)));
+brightness.addEventListener('input', () => visualizer.setBrightness(parseFloat(brightness.value)));
+autoColorCheck.addEventListener('change', () => visualizer.setAutoColor(autoColorCheck.checked));
+colorSpeedSlider.addEventListener('input', () => {
+  const v = parseFloat(colorSpeedSlider.value);
+  visualizer.setColorSpeed(v);
+  speedLabel.textContent = v + 's';
+});
+randomizeBtn.addEventListener('click', () => {
+  visualizer.randomizeColor();
+  hueRotate.value = visualizer.targetHue;
+  saturate.value = visualizer.targetSat;
+  brightness.value = visualizer.targetBright;
+});
+
+// Recording - 1728x1920 portrait
+let mediaRecorder = null;
+let recordedChunks = [];
+let isRecording = false;
+let recordingCanvas = null;
+let recordingCtx = null;
+let recordingAnimationId = null;
+
+downloadBtn.addEventListener('click', async () => {
+  if (isRecording) {
+    // Stop recording
+    isRecording = false;
+    if (recordingAnimationId) {
+      cancelAnimationFrame(recordingAnimationId);
+    }
+    mediaRecorder.stop();
+    return;
+  }
+  
+  try {
+    // Create canvas for recording at 1728x1920 (portrait)
+    recordingCanvas = document.createElement('canvas');
+    recordingCanvas.width = 1728;
+    recordingCanvas.height = 1920;
+    recordingCtx = recordingCanvas.getContext('2d');
+    
+    // Draw first frame to ensure canvas has content
+    drawRecordingFrame();
+    
+    const stream = recordingCanvas.captureStream(30);
+    
+    // Add audio if available
+    if (audio.ctx) {
+      try {
+        const dest = audio.ctx.createMediaStreamDestination();
+        audio.source.connect(dest);
+        const audioTrack = dest.stream.getAudioTracks()[0];
+        if (audioTrack) {
+          stream.addTrack(audioTrack);
+        }
+      } catch (e) {
+        console.log('Could not add audio track:', e);
+      }
+    }
+    
+    // Try different codecs for compatibility
+    let mimeType = 'video/webm';
+    if (MediaRecorder.isTypeSupported('video/webm;codecs=vp8,opus')) {
+      mimeType = 'video/webm;codecs=vp8,opus';
+    } else if (MediaRecorder.isTypeSupported('video/webm;codecs=vp8')) {
+      mimeType = 'video/webm;codecs=vp8';
+    }
+    
+    mediaRecorder = new MediaRecorder(stream, { 
+      mimeType,
+      videoBitsPerSecond: 8000000
+    });
+    recordedChunks = [];
+    
+    mediaRecorder.ondataavailable = (e) => {
+      console.log('Data available:', e.data.size);
+      if (e.data && e.data.size > 0) {
+        recordedChunks.push(e.data);
+      }
+    };
+    
+    mediaRecorder.onerror = (e) => {
+      console.error('MediaRecorder error:', e);
+      showError('Recording error occurred');
+    };
+    
+    mediaRecorder.onstop = () => {
+      console.log('Recording stopped, chunks:', recordedChunks.length);
+      
+      if (recordedChunks.length === 0) {
+        showError('No video data recorded. Try recording for longer.');
+        resetRecordingUI();
+        return;
+      }
+      
+      const blob = new Blob(recordedChunks, { type: mimeType });
+      console.log('Blob size:', blob.size);
+      
+      if (blob.size < 1000) {
+        showError('Recording too short or failed. Try again.');
+        resetRecordingUI();
+        return;
+      }
+      
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'silk-visualizer-1728x1920.webm';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      
+      resetRecordingUI();
+      
+      // Show conversion instructions
+      setTimeout(() => {
+        alert('WebM downloaded!\\n\\nConvert to MP4 with FFmpeg:\\n\\nffmpeg -i silk-visualizer-1728x1920.webm -c:v libx264 -preset slow -crf 18 -c:a aac -b:a 192k silk-output.mp4');
+      }, 500);
+    };
+    
+    // Start recording with timeslice to get data periodically
+    mediaRecorder.start(1000); // Get data every 1 second
+    isRecording = true;
+    
+    // Start drawing frames
+    function recordLoop() {
+      if (!isRecording) return;
+      drawRecordingFrame();
+      recordingAnimationId = requestAnimationFrame(recordLoop);
+    }
+    recordLoop();
+    
+    recordingIndicator.style.display = 'flex';
+    downloadBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="6" y="6" width="12" height="12"/></svg> STOP RECORDING';
+    
+  } catch (err) {
+    console.error('Recording setup error:', err);
+    showError('Recording not supported: ' + err.message);
+  }
+});
+
+function drawRecordingFrame() {
+  if (!recordingCtx || !recordingCanvas) return;
+  
+  // Clear canvas
+  recordingCtx.fillStyle = '#020203';
+  recordingCtx.fillRect(0, 0, recordingCanvas.width, recordingCanvas.height);
+  
+  // Apply filter
+  recordingCtx.filter = silkVideo.style.filter || 'none';
+  
+  // Get video dimensions
+  const vw = silkVideo.videoWidth || 1920;
+  const vh = silkVideo.videoHeight || 1080;
+  
+  // Calculate crop to fit 1728x1920 portrait from video
+  const videoAspect = vw / vh;
+  const canvasAspect = recordingCanvas.width / recordingCanvas.height;
+  
+  let sx, sy, sw, sh;
+  
+  if (videoAspect > canvasAspect) {
+    sh = vh;
+    sw = sh * canvasAspect;
+    sx = (vw - sw) / 2;
+    sy = 0;
+  } else {
+    sw = vw;
+    sh = sw / canvasAspect;
+    sx = 0;
+    sy = (vh - sh) / 2;
+  }
+  
+  // Get scale from transform
+  const scaleMatch = silkVideo.style.transform?.match(/scale\(([\d.]+)\)/);
+  const scale = scaleMatch ? parseFloat(scaleMatch[1]) : 1;
+  
+  recordingCtx.save();
+  recordingCtx.translate(recordingCanvas.width / 2, recordingCanvas.height / 2);
+  recordingCtx.scale(scale, scale);
+  recordingCtx.translate(-recordingCanvas.width / 2, -recordingCanvas.height / 2);
+  
+  try {
+    recordingCtx.drawImage(
+      silkVideo, 
+      sx, sy, sw, sh,
+      0, 0, recordingCanvas.width, recordingCanvas.height
+    );
+  } catch (e) {
+    // Video might not be ready
+  }
+  
+  recordingCtx.restore();
+  recordingCtx.filter = 'none';
+}
+
+function resetRecordingUI() {
+  isRecording = false;
+  recordingIndicator.style.display = 'none';
+  downloadBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg> DOWNLOAD VIDEO';
+}
+
+// Animation loop
+let lastTime = 0;
+function animate(time) {
+  const dt = Math.min((time - lastTime) / 1000, 0.1);
+  lastTime = time;
+  
+  if (audio.isPlaying) {
+    visualizer.setAudioData(audio.getFrequencyData());
+    currentTimeEl.textContent = formatTime(audio.currentTime);
+    seekBar.value = (audio.currentTime / audio.duration) * 100;
+  }
+  
+  visualizer.update(dt);
+  requestAnimationFrame(animate);
+}
+
+audio.audio.addEventListener('ended', () => {
+  audio.isPlaying = false;
+  updatePlayPauseIcon();
+});
+
+requestAnimationFrame(animate);
+  </script>
+</body>
+</html>
