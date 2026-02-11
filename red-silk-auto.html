@@ -1,0 +1,367 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Red Silk - Auto Audio2</title>
+  <link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@300;400;500;600&display=swap" rel="stylesheet">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { 
+      background: #020203; 
+      overflow: hidden; 
+      font-family: 'Rajdhani', sans-serif; 
+      color: #fff; 
+    }
+    
+    .video-container {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100vw;
+      height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+    }
+    
+    .silk-video {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      transition: filter 0.3s ease, transform 0.2s ease;
+    }
+    
+    .start-btn {
+      position: fixed;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      padding: 20px 40px;
+      background: rgba(255,0,0,0.2);
+      border: 2px solid rgba(255,0,0,0.5);
+      border-radius: 8px;
+      color: #fff;
+      font-size: 18px;
+      cursor: pointer;
+      z-index: 100;
+      transition: all 0.3s ease;
+    }
+    
+    .start-btn:hover {
+      background: rgba(255,0,0,0.4);
+      border-color: rgba(255,0,0,0.8);
+      box-shadow: 0 0 20px rgba(255,0,0,0.5);
+    }
+    
+    .controls {
+      position: fixed;
+      bottom: 30px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: none;
+      align-items: center;
+      gap: 16px;
+      padding: 12px 24px;
+      background: rgba(2,2,3,0.9);
+      border-radius: 30px;
+      border: 1px solid rgba(255,0,0,0.3);
+    }
+    
+    .control-btn {
+      width: 36px;
+      height: 36px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: transparent;
+      border: 1px solid rgba(255,0,0,0.5);
+      border-radius: 50%;
+      color: #fff;
+      cursor: pointer;
+      transition: all 0.3s ease;
+    }
+    
+    .control-btn:hover {
+      background: rgba(255,0,0,0.2);
+      border-color: #ff0000;
+    }
+  </style>
+</head>
+<body>
+  <!-- Auto-load audio2.mp3 -->
+  <audio id="audioElement" preload="auto">
+    <source src="audio2.mp3" type="audio/mpeg">
+  </audio>
+
+  <!-- Silk Video Background -->
+  <div class="video-container">
+    <video id="silkVideo" class="silk-video" autoplay loop muted playsinline>
+      <source src="silk_background.mp4" type="video/mp4">
+    </video>
+  </div>
+  
+  <button class="start-btn" id="startBtn">Start Red Silk Visualizer</button>
+  
+  <div class="controls" id="controls">
+    <button class="control-btn" id="playPauseBtn">
+      <svg id="playIcon" width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+        <polygon points="5 3 19 12 5 21"/>
+      </svg>
+      <svg id="pauseIcon" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="display:none;">
+        <rect x="6" y="4" width="4" height="16"/>
+        <rect x="14" y="4" width="4" height="16"/>
+      </svg>
+    </button>
+  </div>
+
+  <script>
+class RedSilkVisualizer {
+  constructor(videoElement) {
+    this.video = videoElement;
+    
+    // 5 Red shades for smooth transitions
+    this.redShades = [
+      { hue: 0, sat: 200, bright: 130 },    // Pure Red
+      { hue: 0, sat: 250, bright: 100 },    // Dark Red
+      { hue: 0, sat: 280, bright: 150 },    // Bright Red
+      { hue: 0, sat: 180, bright: 90 },     // Deep Red
+      { hue: 0, sat: 220, bright: 120 }     // Medium Red
+    ];
+    
+    this.currentShadeIndex = 0;
+    this.targetShadeIndex = 1;
+    this.shadeTransition = 0;
+    
+    this.hue = 0;
+    this.saturation = 200;
+    this.brightness = 130;
+    this.targetHue = 0;
+    this.targetSat = 200;
+    this.targetBright = 130;
+    
+    this.colorSpeed = 1.5;   // Fast transitions
+    this.time = 0;
+    this.impulse = 0;
+    this.audioData = { bass: 0, mids: 0, highs: 0, amplitude: 0, beat: false };
+  }
+  
+  setAudioData(data) {
+    this.audioData = data;
+    if (data.beat) {
+      this.impulse = 1;
+      this.nextRedShade();
+    }
+  }
+  
+  nextRedShade() {
+    this.currentShadeIndex = this.targetShadeIndex;
+    this.targetShadeIndex = (this.targetShadeIndex + 1) % this.redShades.length;
+    this.shadeTransition = 0;
+  }
+  
+  // Smooth easing function
+  easeInOutCubic(t) {
+    return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+  }
+  
+  update(dt) {
+    this.time += dt;
+    
+    // Auto red shade transitions
+    this.shadeTransition += dt / this.colorSpeed;
+    
+    if (this.shadeTransition >= 1) {
+      this.nextRedShade();
+    }
+    
+    // Smooth interpolation between red shades
+    const current = this.redShades[this.currentShadeIndex];
+    const target = this.redShades[this.targetShadeIndex];
+    const t = Math.min(this.shadeTransition, 1);
+    const smoothT = this.easeInOutCubic(t);
+    
+    this.targetHue = current.hue + (target.hue - current.hue) * smoothT;
+    this.targetSat = current.sat + (target.sat - current.sat) * smoothT;
+    this.targetBright = current.bright + (target.bright - current.bright) * smoothT;
+    
+    // Ultra-smooth color transitions
+    const lerpSpeed = 0.015; // Very smooth
+    this.hue += (this.targetHue - this.hue) * lerpSpeed;
+    this.saturation += (this.targetSat - this.saturation) * lerpSpeed;
+    this.brightness += (this.targetBright - this.brightness) * lerpSpeed;
+    
+    // Smooth impulse decay
+    this.impulse *= 0.8;
+    
+    // Audio reactive effects with smooth transitions
+    const { bass, mids, amplitude, beat } = this.audioData;
+    
+    // Smooth scaling based on bass
+    const targetScale = 1 + bass * 0.25 + this.impulse * 0.2;
+    const currentScale = parseFloat(this.video.style.transform?.match(/scale\(([\d.]+)\)/)?.[1] || '1');
+    const smoothScale = currentScale + (targetScale - currentScale) * 0.06;
+    
+    // Smooth brightness pulse on beat
+    const brightPulse = this.impulse * 50 + amplitude * 30;
+    
+    // Smooth saturation boost with mids
+    const satBoost = mids * 80;
+    
+    // Apply smooth CSS filters and transform
+    const finalBrightness = Math.max(90, this.brightness + brightPulse);
+    const finalSaturation = Math.max(180, this.saturation + satBoost);
+    
+    // Enhanced red filters with smooth transitions
+    this.video.style.filter = `
+      hue-rotate(${this.hue}deg) 
+      saturate(${finalSaturation}%) 
+      brightness(${finalBrightness}%)
+      contrast(120%)
+      sepia(15%)
+    `;
+    
+    this.video.style.transform = `scale(${smoothScale})`;
+  }
+}
+
+class AudioAnalyzer {
+  constructor() {
+    this.ctx = null;
+    this.analyser = null;
+    this.source = null;
+    this.dataArray = null;
+    this.audio = document.getElementById('audioElement');
+    this.isPlaying = false;
+    this.beatThreshold = 1.3;
+    this.lastBeatTime = 0;
+    this.bassHistory = [];
+    this.historySize = 25;
+  }
+  
+  async init() {
+    return new Promise((resolve, reject) => {
+      this.audio.onloadedmetadata = () => {
+        if (!this.ctx) {
+          this.ctx = new (window.AudioContext || window.webkitAudioContext)();
+          this.analyser = this.ctx.createAnalyser();
+          this.analyser.fftSize = 512;
+          this.analyser.smoothingTimeConstant = 0.8;
+          this.source = this.ctx.createMediaElementSource(this.audio);
+          this.source.connect(this.analyser);
+          this.analyser.connect(this.ctx.destination);
+        }
+        this.dataArray = new Uint8Array(this.analyser.frequencyBinCount);
+        resolve();
+      };
+      this.audio.onerror = reject;
+      this.audio.load();
+    });
+  }
+  
+  play() {
+    if (this.ctx?.state === 'suspended') this.ctx.resume();
+    this.audio.play();
+    this.isPlaying = true;
+  }
+  
+  pause() {
+    this.audio.pause();
+    this.isPlaying = false;
+  }
+  
+  toggle() {
+    this.isPlaying ? this.pause() : this.play();
+  }
+  
+  getFrequencyData() {
+    if (!this.analyser || !this.dataArray) {
+      return { bass: 0, mids: 0, highs: 0, amplitude: 0, beat: false };
+    }
+    
+    this.analyser.getByteFrequencyData(this.dataArray);
+    const len = this.dataArray.length;
+    let bass = 0, mids = 0, highs = 0, total = 0;
+    
+    for (let i = 0; i < len; i++) {
+      const v = this.dataArray[i];
+      total += v;
+      if (i < len * 0.15) bass += v;
+      else if (i < len * 0.5) mids += v;
+      else highs += v;
+    }
+    
+    bass /= (len * 0.15 * 255);
+    mids /= (len * 0.35 * 255);
+    highs /= (len * 0.5 * 255);
+    const amplitude = total / (len * 255);
+    
+    this.bassHistory.push(bass);
+    if (this.bassHistory.length > this.historySize) this.bassHistory.shift();
+    const avgBass = this.bassHistory.reduce((a, b) => a + b, 0) / this.bassHistory.length;
+    
+    const now = performance.now();
+    const beat = bass > avgBass * this.beatThreshold && now - this.lastBeatTime > 120;
+    if (beat) this.lastBeatTime = now;
+    
+    return { bass, mids, highs, amplitude, beat };
+  }
+}
+
+// Main App
+const silkVideo = document.getElementById('silkVideo');
+const visualizer = new RedSilkVisualizer(silkVideo);
+const audio = new AudioAnalyzer();
+
+const startBtn = document.getElementById('startBtn');
+const controls = document.getElementById('controls');
+const playPauseBtn = document.getElementById('playPauseBtn');
+const playIcon = document.getElementById('playIcon');
+const pauseIcon = document.getElementById('pauseIcon');
+
+function updatePlayPauseIcon() {
+  playIcon.style.display = audio.isPlaying ? 'none' : 'block';
+  pauseIcon.style.display = audio.isPlaying ? 'block' : 'none';
+}
+
+startBtn.addEventListener('click', async () => {
+  try {
+    await audio.init();
+    startBtn.style.display = 'none';
+    controls.style.display = 'flex';
+    audio.play();
+    updatePlayPauseIcon();
+  } catch (err) {
+    console.error('Failed to load audio2.mp3:', err);
+  }
+});
+
+playPauseBtn.addEventListener('click', () => {
+  audio.toggle();
+  updatePlayPauseIcon();
+});
+
+// Animation loop
+let lastTime = 0;
+function animate(time) {
+  const dt = Math.min((time - lastTime) / 1000, 0.1);
+  lastTime = time;
+  
+  if (audio.isPlaying) {
+    visualizer.setAudioData(audio.getFrequencyData());
+  }
+  
+  visualizer.update(dt);
+  requestAnimationFrame(animate);
+}
+
+audio.audio.addEventListener('ended', () => {
+  audio.isPlaying = false;
+  updatePlayPauseIcon();
+});
+
+requestAnimationFrame(animate);
+  </script>
+</body>
+</html>

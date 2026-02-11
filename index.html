@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Silk - Audio Visualizer</title>
+  <title>Red Silk - Audio Visualizer</title>
   <link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@300;400;500;600&display=swap" rel="stylesheet">
   <style>
     :root {
@@ -291,7 +291,7 @@
   <!-- Silk Video Background -->
   <div class="video-container">
     <video id="silkVideo" class="silk-video" autoplay loop muted playsinline>
-      <source src="https://resonation.io/wp-content/uploads/2022/02/SL_HERO-FADE-80.mp4" type="video/mp4">
+      <source src="silk_background.mp4" type="video/mp4">
     </video>
   </div>
   
@@ -331,32 +331,32 @@
     
     <div class="customizer">
       <div class="customizer-header">
-        <span>CUSTOMIZER</span>
+        <span>RED VISUALIZER</span>
         <button class="btn" id="randomizeBtn">Randomize</button>
       </div>
       <div class="color-group">
-        <label>Color Filter</label>
+        <label>Red Shades</label>
         <div class="slider-row">
           <span>H</span>
-          <input type="range" id="hueRotate" min="0" max="360" value="0">
+          <input type="range" id="hueRotate" min="0" max="10" value="0">
         </div>
         <div class="slider-row">
           <span>S</span>
-          <input type="range" id="saturate" min="50" max="200" value="100">
+          <input type="range" id="saturate" min="150" max="300" value="180">
         </div>
         <div class="slider-row">
           <span>B</span>
-          <input type="range" id="brightness" min="50" max="150" value="100">
+          <input type="range" id="brightness" min="80" max="180" value="120">
         </div>
       </div>
       <div class="checkbox-row">
-        <input type="checkbox" id="autoColor">
-        <label for="autoColor">Auto Color Change</label>
+        <input type="checkbox" id="autoColor" checked>
+        <label for="autoColor">Auto Red Transitions</label>
       </div>
       <div class="slider-row">
         <span>⏱</span>
-        <input type="range" id="colorSpeed" min="1" max="10" value="3">
-        <span style="width:auto;opacity:0.4" id="speedLabel">3s</span>
+        <input type="range" id="colorSpeed" min="1" max="8" value="2">
+        <span style="width:auto;opacity:0.4" id="speedLabel">2s</span>
       </div>
       <div class="download-section">
         <button class="download-btn" id="downloadBtn" disabled>
@@ -465,17 +465,32 @@ class AudioAnalyzer {
   }
 }
 
-class SilkVisualizer {
+class RedSilkVisualizer {
   constructor(videoElement) {
     this.video = videoElement;
+    
+    // 5 Red shades for smooth transitions
+    this.redShades = [
+      { hue: 0, sat: 180, bright: 120 },    // Pure Red
+      { hue: 0, sat: 220, bright: 90 },     // Dark Red
+      { hue: 0, sat: 250, bright: 140 },    // Bright Red
+      { hue: 0, sat: 160, bright: 80 },     // Deep Red
+      { hue: 0, sat: 200, bright: 110 }     // Medium Red
+    ];
+    
+    this.currentShadeIndex = 0;
+    this.targetShadeIndex = 1;
+    this.shadeTransition = 0;
+    
     this.hue = 0;
-    this.saturation = 100;
-    this.brightness = 100;
+    this.saturation = 180;
+    this.brightness = 120;
     this.targetHue = 0;
-    this.targetSat = 100;
-    this.targetBright = 100;
-    this.autoColor = false;
-    this.colorSpeed = 3;
+    this.targetSat = 180;
+    this.targetBright = 120;
+    
+    this.autoColor = true; // Auto red transitions enabled by default
+    this.colorSpeed = 2;   // Faster transitions
     this.lastColorChange = 0;
     this.time = 0;
     this.impulse = 0;
@@ -484,69 +499,111 @@ class SilkVisualizer {
   
   setAudioData(data) {
     this.audioData = data;
-    if (data.beat) this.impulse = 1;
+    if (data.beat) {
+      this.impulse = 1;
+      // Change red shade on beat
+      if (this.autoColor) {
+        this.nextRedShade();
+      }
+    }
   }
   
-  setHue(h) { this.targetHue = h; }
+  nextRedShade() {
+    this.currentShadeIndex = this.targetShadeIndex;
+    this.targetShadeIndex = (this.targetShadeIndex + 1) % this.redShades.length;
+    this.shadeTransition = 0;
+  }
+  
+  setHue(h) { 
+    // Keep hue in red range only (0-10 degrees)
+    this.targetHue = Math.max(0, Math.min(10, h)); 
+  }
   setSaturation(s) { this.targetSat = s; }
   setBrightness(b) { this.targetBright = b; }
   setAutoColor(enabled) { this.autoColor = enabled; }
   setColorSpeed(s) { this.colorSpeed = s; }
   
-  randomizeColor() {
-    this.targetHue = Math.random() * 360;
-    this.targetSat = 80 + Math.random() * 70;
-    this.targetBright = 90 + Math.random() * 30;
+  randomizeRedColor() {
+    // Randomize within red shades only
+    const randomShade = this.redShades[Math.floor(Math.random() * this.redShades.length)];
+    this.targetHue = randomShade.hue + Math.random() * 5; // Small hue variation
+    this.targetSat = randomShade.sat + (Math.random() - 0.5) * 40;
+    this.targetBright = randomShade.bright + (Math.random() - 0.5) * 30;
+  }
+  
+  // Smooth easing function
+  easeInOutCubic(t) {
+    return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
   }
   
   update(dt) {
     this.time += dt;
     
-    // Smooth color transitions using lerp
-    const lerpSpeed = 0.03;
-    this.hue += (this.targetHue - this.hue) * lerpSpeed;
-    this.saturation += (this.targetSat - this.saturation) * lerpSpeed;
-    this.brightness += (this.targetBright - this.targetBright) * lerpSpeed;
-    
-    // Auto color change with smooth transition
-    if (this.autoColor && this.time - this.lastColorChange > this.colorSpeed) {
-      this.targetHue = Math.random() * 360;
-      this.targetSat = 80 + Math.random() * 70;
-      this.lastColorChange = this.time;
+    // Auto red shade transitions
+    if (this.autoColor) {
+      this.shadeTransition += dt / this.colorSpeed;
+      
+      if (this.shadeTransition >= 1) {
+        this.nextRedShade();
+      }
+      
+      // Smooth interpolation between red shades
+      const current = this.redShades[this.currentShadeIndex];
+      const target = this.redShades[this.targetShadeIndex];
+      const t = Math.min(this.shadeTransition, 1);
+      const smoothT = this.easeInOutCubic(t);
+      
+      this.targetHue = current.hue + (target.hue - current.hue) * smoothT;
+      this.targetSat = current.sat + (target.sat - current.sat) * smoothT;
+      this.targetBright = current.bright + (target.bright - current.bright) * smoothT;
     }
     
-    // Decay impulse smoothly
-    this.impulse *= 0.9;
+    // Ultra-smooth color transitions
+    const lerpSpeed = 0.02; // Slower for smoother transitions
+    this.hue += (this.targetHue - this.hue) * lerpSpeed;
+    this.saturation += (this.targetSat - this.saturation) * lerpSpeed;
+    this.brightness += (this.targetBright - this.brightness) * lerpSpeed;
     
-    // Audio reactive effects
+    // Smooth impulse decay
+    this.impulse *= 0.85;
+    
+    // Audio reactive effects with smooth transitions
     const { bass, mids, amplitude, beat } = this.audioData;
     
-    // Scale based on bass
-    const scale = 1 + bass * 0.15 + this.impulse * 0.1;
+    // Smooth scaling based on bass
+    const targetScale = 1 + bass * 0.2 + this.impulse * 0.15;
+    const currentScale = parseFloat(this.video.style.transform?.match(/scale\(([\d.]+)\)/)?.[1] || '1');
+    const smoothScale = currentScale + (targetScale - currentScale) * 0.08;
     
-    // Brightness pulse on beat
-    const brightPulse = this.impulse * 30;
+    // Smooth brightness pulse on beat
+    const brightPulse = this.impulse * 40 + amplitude * 25;
     
-    // Saturation boost with mids
-    const satBoost = mids * 50;
+    // Smooth saturation boost with mids
+    const satBoost = mids * 60;
     
-    // Apply CSS filters and transform
-    const finalBrightness = this.brightness + brightPulse + amplitude * 20;
-    const finalSaturation = this.saturation + satBoost;
+    // Apply smooth CSS filters and transform
+    const finalBrightness = Math.max(80, this.brightness + brightPulse);
+    const finalSaturation = Math.max(150, this.saturation + satBoost);
     
+    // Enhanced red filters with smooth transitions
     this.video.style.filter = `
       hue-rotate(${this.hue}deg) 
       saturate(${finalSaturation}%) 
       brightness(${finalBrightness}%)
+      contrast(115%)
+      sepia(20%)
     `;
     
-    this.video.style.transform = `scale(${scale})`;
+    this.video.style.transform = `scale(${smoothScale})`;
+    
+    // Smooth transition timing
+    this.video.style.transition = 'filter 0.3s ease, transform 0.2s ease';
   }
 }
 
 // Main App
 const silkVideo = document.getElementById('silkVideo');
-const visualizer = new SilkVisualizer(silkVideo);
+const visualizer = new RedSilkVisualizer(silkVideo);
 const audio = new AudioAnalyzer();
 
 // DOM elements
@@ -624,7 +681,7 @@ colorSpeedSlider.addEventListener('input', () => {
   speedLabel.textContent = v + 's';
 });
 randomizeBtn.addEventListener('click', () => {
-  visualizer.randomizeColor();
+  visualizer.randomizeRedColor();
   hueRotate.value = visualizer.targetHue;
   saturate.value = visualizer.targetSat;
   brightness.value = visualizer.targetBright;
@@ -685,7 +742,7 @@ downloadBtn.addEventListener('click', async () => {
     
     mediaRecorder = new MediaRecorder(stream, { 
       mimeType,
-      videoBitsPerSecond: 8000000
+      videoBitsPerSecond: 50000000  // 50Mbps for maximum quality
     });
     recordedChunks = [];
     
