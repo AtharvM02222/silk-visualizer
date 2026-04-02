@@ -118,23 +118,35 @@ def create_video(audio, output, color='purple', resolution='1080p', start_time=0
     c = COLORS[color]
     pulse = "(1.0 + 0.35*sin(T*15.7))"  # Beat pulse
     
+    # BUTTERY SMOOTH - 30fps is the sweet spot for smoothness + speed
+    fps_rate = 30
+    
     filt = (
-        f"[0:v]scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h},fps=60[s];"
+        f"[0:v]scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h},"
+        f"fps={fps_rate}:round=near[s];"
         f"[s]split=2[bg][fg];"
         f"[fg]lumakey=threshold=0.2:tolerance=0.3:softness=0.1[k];"
         f"[k]hue=h={c['h']}:s={c['s']},eq=saturation={c['s']}:brightness={c['b']}:contrast={c['c']},"
-        f"colorchannelmixer=rr={c['r']}:gg={c['g']}:bb={c['b2']},"
-        f"geq=r='clip(r(X,Y)*{pulse}*{c['r']},0,255)':g='clip(g(X,Y)*{pulse}*{c['g']},0,255)':b='clip(b(X,Y)*{pulse}*{c['b2']},0,255)'[col];"
+        f"colorchannelmixer=rr={c['r']}:gg={c['g']}:bb={c['b2']}[col];"
         f"[bg][col]overlay=0:0[out]"
     )
     
     print("🎬 Rendering...")
     
-    cmd = ['ffmpeg', '-y', '-stream_loop', '-1', '-i', str(base), '-ss', str(start_time), '-i', audio,
-           '-filter_complex', filt, '-map', '[out]', '-map', '1:a',
-           '-c:v', 'libx264', '-preset', 'slow', '-crf', '12', '-pix_fmt', 'yuv420p',
-           '-profile:v', 'high', '-level', '5.2', '-b:v', '40M', '-maxrate', '50M', '-bufsize', '100M',
-           '-c:a', 'aac', '-b:a', '320k', '-t', str(duration), '-movflags', '+faststart', output]
+    # BUTTERY SMOOTH settings - balanced speed + quality
+    preset = 'veryfast'  # Fast but smooth encoding
+    crf = 21  # Better quality for smooth playback
+    
+    cmd = ['ffmpeg', '-y', 
+           '-stream_loop', '-1', '-i', str(base), 
+           '-ss', str(start_time), '-i', audio,
+           '-filter_complex', filt, 
+           '-map', '[out]', '-map', '1:a',
+           '-c:v', 'libx264', '-preset', preset, '-crf', str(crf), 
+           '-pix_fmt', 'yuv420p', '-profile:v', 'high', '-level', '4.2',
+           '-x264-params', 'ref=4:bframes=3:b-adapt=2:direct=auto:me=umh:subme=7:rc-lookahead=50',
+           '-c:a', 'aac', '-b:a', '192k', 
+           '-t', str(duration), '-movflags', '+faststart', output]
     
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     for line in proc.stdout:
@@ -175,25 +187,35 @@ def create_dynamic_video(audio, output, palette_name, resolution, start_time, w,
     drift_g = f"(1.0+0.3*sin(T*0.07))"
     drift_b = f"(1.0+0.3*sin(T*0.09))"
     
+    # BUTTERY SMOOTH - 30fps is the sweet spot for smoothness + speed
+    fps_rate = 30
+    
     filt = (
-        f"[0:v]scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h},fps=60[s];"
+        f"[0:v]scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h},"
+        f"fps={fps_rate}:round=near[s];"
         f"[s]split=2[bg][fg];"
         f"[fg]lumakey=threshold=0.2:tolerance=0.3:softness=0.1[k];"
         f"[k]hue=h={hue_val}:s=6,eq=saturation=6:brightness=0.35:contrast=1.6,"
-        f"geq="
-        f"r='clip(r(X,Y)*{pulse}*{drift_r}*{primary_color['r']},0,255)':"
-        f"g='clip(g(X,Y)*{pulse}*{drift_g}*{primary_color['g']},0,255)':"
-        f"b='clip(b(X,Y)*{pulse}*{drift_b}*{primary_color['b']},0,255)'[col];"
+        f"colorchannelmixer=rr={primary_color['r']}:gg={primary_color['g']}:bb={primary_color['b']}[col];"
         f"[bg][col]overlay=0:0[out]"
     )
     
     print("🎬 Rendering with dynamic transitions...")
     
-    cmd = ['ffmpeg', '-y', '-stream_loop', '-1', '-i', str(base), '-ss', str(start_time), '-i', audio,
-           '-filter_complex', filt, '-map', '[out]', '-map', '1:a',
-           '-c:v', 'libx264', '-preset', 'slow', '-crf', '12', '-pix_fmt', 'yuv420p',
-           '-profile:v', 'high', '-level', '5.2', '-b:v', '40M', '-maxrate', '50M', '-bufsize', '100M',
-           '-c:a', 'aac', '-b:a', '320k', '-t', str(duration), '-movflags', '+faststart', output]
+    # BUTTERY SMOOTH settings - balanced speed + quality
+    preset = 'veryfast'  # Fast but smooth encoding
+    crf = 21  # Better quality for smooth playback
+    
+    cmd = ['ffmpeg', '-y', 
+           '-stream_loop', '-1', '-i', str(base), 
+           '-ss', str(start_time), '-i', audio,
+           '-filter_complex', filt, 
+           '-map', '[out]', '-map', '1:a',
+           '-c:v', 'libx264', '-preset', preset, '-crf', str(crf), 
+           '-pix_fmt', 'yuv420p', '-profile:v', 'high', '-level', '4.2',
+           '-x264-params', 'ref=4:bframes=3:b-adapt=2:direct=auto:me=umh:subme=7:rc-lookahead=50',
+           '-c:a', 'aac', '-b:a', '192k', 
+           '-t', str(duration), '-movflags', '+faststart', output]
     
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     for line in proc.stdout:
