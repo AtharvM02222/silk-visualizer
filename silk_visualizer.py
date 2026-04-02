@@ -123,43 +123,30 @@ def create_dynamic_video(audio, output, palette_name, resolution, start_time, w,
     """Create video with smooth color transitions based on audio dynamics"""
     palette = COLOR_PALETTES[palette_name]
     
-    # Audio-reactive color transitions using volume analysis
-    # We'll create smooth interpolation between colors every 8-12 seconds
+    # Use a simpler approach: pick one color from palette and vary it
+    # This avoids complex expression parsing issues
+    primary_color = palette[0]  # Use first color as base
     
-    # Build dynamic geq expressions with smooth transitions
-    # Use audio volume (via ASELECT) to drive color transitions
+    # Simple approach: use static hue with dynamic RGB modulation
+    hue_val = primary_color['h']
     
-    # Simplified: cycle through colors with smooth sine-wave transitions
-    num_colors = len(palette)
-    cycle_speed = 0.08  # Slower = smoother transitions
+    # Create pulsing effect with the primary color values
+    pulse = "(1.0+0.5*sin(T*15.7))"  # Beat pulse
     
-    # Create smooth color interpolation using sine waves
-    color_funcs = []
-    for i, c in enumerate(palette):
-        phase = f"(sin(T*{cycle_speed} - {i * 2 / num_colors}*PI) + 1) / 2"  # Smooth 0-1 cycle
-        weight = f"pow({phase}, 3)"  # Cubic easing for smoother transitions
-        color_funcs.append((c, weight))
-    
-    # Build weighted color mixing expressions
-    r_expr = " + ".join([f"({w} * {c['r']})" for c, w in color_funcs])
-    g_expr = " + ".join([f"({w} * {c['g']})" for c, w in color_funcs])
-    b_expr = " + ".join([f"({w} * {c['b']})" for c, w in color_funcs])
-    
-    # Add beat pulse on top
-    pulse = "(1.0 + 0.4*sin(T*15.7))"
-    
-    # Dynamic hue rotation through all palette hues
-    hue_expr = " + ".join([f"({color_funcs[i][1]} * {c['h']})" for i, c in enumerate(palette)])
+    # Add slow color drift for variety
+    drift_r = f"(1.0+0.3*sin(T*0.05))"
+    drift_g = f"(1.0+0.3*sin(T*0.07))"
+    drift_b = f"(1.0+0.3*sin(T*0.09))"
     
     filt = (
         f"[0:v]scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h},fps=60[s];"
         f"[s]split=2[bg][fg];"
         f"[fg]lumakey=threshold=0.2:tolerance=0.3:softness=0.1[k];"
-        f"[k]hue=h='({hue_expr})':s=6,eq=saturation=6:brightness=0.35:contrast=1.6,"
+        f"[k]hue=h={hue_val}:s=6,eq=saturation=6:brightness=0.35:contrast=1.6,"
         f"geq="
-        f"r='clip(r(X,Y)*{pulse}*({r_expr}),0,255)':"
-        f"g='clip(g(X,Y)*{pulse}*({g_expr}),0,255)':"
-        f"b='clip(b(X,Y)*{pulse}*({b_expr}),0,255)'[col];"
+        f"r='clip(r(X,Y)*{pulse}*{drift_r}*{primary_color['r']},0,255)':"
+        f"g='clip(g(X,Y)*{pulse}*{drift_g}*{primary_color['g']},0,255)':"
+        f"b='clip(b(X,Y)*{pulse}*{drift_b}*{primary_color['b']},0,255)'[col];"
         f"[bg][col]overlay=0:0[out]"
     )
     
