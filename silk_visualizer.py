@@ -1,266 +1,524 @@
 #!/usr/bin/env python3
 """
-SILK VISUALIZER - Beat-synced silk animations with dynamic color transitions
-Usage: python silk_visualizer.py <audio> [color] [resolution] [start_seconds]
+SILK FLUID ORB VISUALIZER - Realistic fluid simulation inside glowing sphere
+Matches the organic flowing silk/lava patterns from reference videos
+
+Usage: python silk_visualizer.py <audio> [resolution] [fps] [color_scheme]
 """
 
 import subprocess
 import sys
+import os
 import re
+import math
+import tempfile
+import shutil
 from pathlib import Path
+import numpy as np
+from PIL import Image, ImageDraw, ImageFilter
 
-COLORS = {
-    'red':    {'h': 0,   's': 5, 'b': 0.3, 'c': 1.6, 'r': 1.8, 'g': 0.2, 'b2': 0.15},
-    'blue':   {'h': 220, 's': 6, 'b': 0.35, 'c': 1.5, 'r': 0.15, 'g': 0.4, 'b2': 1.9},
-    'purple': {'h': 280, 's': 5.5, 'b': 0.3, 'c': 1.55, 'r': 1.4, 'g': 0.2, 'b2': 1.6},
-    'green':  {'h': 120, 's': 6, 'b': 0.4, 'c': 1.5, 'r': 0.2, 'g': 1.8, 'b2': 0.2},
-    'gold':   {'h': 45,  's': 5, 'b': 0.45, 'c': 1.4, 'r': 1.7, 'g': 1.3, 'b2': 0.15},
-    'cyan':   {'h': 185, 's': 6, 'b': 0.35, 'c': 1.5, 'r': 0.15, 'g': 1.5, 'b2': 1.7},
-    'white':  {'h': 0,   's': 0, 'b': 0.6, 'c': 1.8, 'r': 1.5, 'g': 1.5, 'b2': 1.5},
-    'pink':   {'h': 330, 's': 5, 'b': 0.35, 'c': 1.5, 'r': 1.7, 'g': 0.3, 'b2': 1.2},
+# ==================== VECTORIZED PERLIN NOISE ====================
+class VectorizedNoise:
+    """Fast vectorized Perlin noise using numpy"""
+    
+    def __init__(self, seed=0):
+        np.random.seed(seed)
+        self.perm = np.arange(256, dtype=np.int32)
+        np.random.shuffle(self.perm)
+        self.perm = np.tile(self.perm, 2)
+        
+        # Gradient vectors
+        angles = np.linspace(0, 2 * np.pi, 8, endpoint=False)
+        self.gradients = np.stack([np.cos(angles), np.sin(angles)], axis=1)
+    
+    def _fade(self, t):
+        return t * t * t * (t * (t * 6 - 15) + 10)
+    
+    def noise2d(self, x, y):
+        """Vectorized 2D Perlin noise"""
+        # Grid coordinates
+        xi = np.floor(x).astype(np.int32) & 255
+        yi = np.floor(y).astype(np.int32) & 255
+        xf = x - np.floor(x)
+        yf = y - np.floor(y)
+        
+        # Fade curves
+        u = self._fade(xf)
+        v = self._fade(yf)
+        
+        # Hash coordinates
+        aa = self.perm[self.perm[xi] + yi] % 8
+        ab = self.perm[self.perm[xi] + yi + 1] % 8
+        ba = self.perm[self.perm[xi + 1] + yi] % 8
+        bb = self.perm[self.perm[xi + 1] + yi + 1] % 8
+        
+        # Gradient dot products
+        g_aa = self.gradients[aa, 0] * xf + self.gradients[aa, 1] * yf
+        g_ba = self.gradients[ba, 0] * (xf - 1) + self.gradients[ba, 1] * yf
+        g_ab = self.gradients[ab, 0] * xf + self.gradients[ab, 1] * (yf - 1)
+        g_bb = self.gradients[bb, 0] * (xf - 1) + self.gradients[bb, 1] * (yf - 1)
+        
+        # Interpolate
+        x1 = g_aa + u * (g_ba - g_aa)
+        x2 = g_ab + u * (g_bb - g_ab)
+        return x1 + v * (x2 - x1)
+    
+    def fbm(self, x, y, octaves=5, lacunarity=2.0, persistence=0.5):
+        """Fractal Brownian Motion - layered noise"""
+        value = np.zeros_like(x)
+        amplitude = 1.0
+        max_val = 0.0
+        
+        for _ in range(octaves):
+            value += amplitude * self.noise2d(x, y)
+            max_val += amplitude
+            amplitude *= persistence
+            x = x * lacunarity
+            y = y * lacunarity
+        
+        return value / max_val
+    
+    def turbulence(self, x, y, octaves=5):
+        """Turbulent noise - absolute values for wispy patterns"""
+        value = np.zeros_like(x)
+        amplitude = 1.0
+        max_val = 0.0
+        
+        for _ in range(octaves):
+            value += amplitude * np.abs(self.noise2d(x, y))
+            max_val += amplitude
+            amplitude *= 0.5
+            x = x * 2
+            y = y * 2
+        
+        return value / max_val
+
+
+# ==================== COLOR SCHEMES ====================
+COLOR_SCHEMES = {
+    'purple': {  # Purple/magenta silk - matches reference (DEEPER DARKS)
+        'dark': np.array([15, 0, 25]),      # Nearly black with purple tint
+        'mid': np.array([120, 30, 150]),    # Deep purple
+        'bright': np.array([220, 120, 240]),# Bright magenta
+        'hot': np.array([255, 200, 255]),   # Hot pink/white
+        'glow': (180, 80, 220),
+    },
+    'lava': {  # Red/orange lava flow
+        'dark': np.array([20, 5, 0]),
+        'mid': np.array([180, 40, 10]),
+        'bright': np.array([255, 130, 40]),
+        'hot': np.array([255, 230, 180]),
+        'glow': (255, 80, 30),
+    },
+    'ocean': {  # Blue/cyan water
+        'dark': np.array([0, 10, 30]),
+        'mid': np.array([20, 80, 180]),
+        'bright': np.array([80, 180, 255]),
+        'hot': np.array([200, 240, 255]),
+        'glow': (60, 150, 255),
+    },
+    'golden': {  # Gold/amber
+        'dark': np.array([25, 15, 0]),
+        'mid': np.array([180, 120, 20]),
+        'bright': np.array([255, 190, 70]),
+        'hot': np.array([255, 245, 200]),
+        'glow': (255, 160, 40),
+    },
+    'emerald': {  # Green plasma
+        'dark': np.array([0, 20, 10]),
+        'mid': np.array([20, 150, 60]),
+        'bright': np.array([80, 240, 130]),
+        'hot': np.array([200, 255, 230]),
+        'glow': (60, 230, 120),
+    },
 }
 
-# Dynamic color palettes with smooth transitions (volcano theme for audio5)
-COLOR_PALETTES = {
-    'volcano': [
-        {'name': 'dark_red',    'h': 0,   'r': 1.2, 'g': 0.15, 'b': 0.1},   # Deep volcanic red
-        {'name': 'blood_red',   'h': 355, 'r': 1.9, 'g': 0.2,  'b': 0.15},  # Intense blood red
-        {'name': 'lava_orange', 'h': 15,  'r': 2.0, 'g': 0.8,  'b': 0.1},   # Hot lava orange
-        {'name': 'ember_red',   'h': 5,   'r': 1.7, 'g': 0.35, 'b': 0.12},  # Burning ember
-    ],
-    'ocean': [
-        {'name': 'deep_blue',  'h': 210, 'r': 0.1,  'g': 0.3, 'b': 1.6},
-        {'name': 'cyan_wave',  'h': 190, 'r': 0.15, 'g': 1.2, 'b': 1.8},
-        {'name': 'teal',       'h': 175, 'r': 0.2,  'g': 1.5, 'b': 1.4},
-    ],
-    'sunset': [
-        {'name': 'purple',     'h': 280, 'r': 1.4, 'g': 0.2, 'b': 1.6},
-        {'name': 'pink',       'h': 330, 'r': 1.7, 'g': 0.3, 'b': 1.2},
-        {'name': 'orange',     'h': 30,  'r': 1.8, 'g': 1.0, 'b': 0.2},
-    ]
-}
 
+def colormap_vectorized(t, colors):
+    """Vectorized color interpolation through gradient stops - HIGH CONTRAST"""
+    t = np.clip(t, 0, 1)
+    
+    # Apply aggressive contrast curve - push darks darker, brights brighter
+    t = np.power(t, 0.7)  # Lift midtones
+    
+    result = np.zeros((*t.shape, 3), dtype=np.float32)
+    
+    # Dark to mid (0 - 0.3) - extended dark range
+    mask1 = t < 0.3
+    ratio1 = t[mask1] / 0.3
+    # Use smoothstep for the ratio to make transition smoother
+    ratio1 = ratio1 * ratio1 * (3 - 2 * ratio1)
+    result[mask1] = colors['dark'] + (colors['mid'] - colors['dark']) * ratio1[:, np.newaxis]
+    
+    # Mid to bright (0.3 - 0.6)
+    mask2 = (t >= 0.3) & (t < 0.6)
+    ratio2 = (t[mask2] - 0.3) / 0.3
+    result[mask2] = colors['mid'] + (colors['bright'] - colors['mid']) * ratio2[:, np.newaxis]
+    
+    # Bright to hot (0.6 - 0.82)
+    mask3 = (t >= 0.6) & (t < 0.82)
+    ratio3 = (t[mask3] - 0.6) / 0.22
+    result[mask3] = colors['bright'] + (colors['hot'] - colors['bright']) * ratio3[:, np.newaxis]
+    
+    # Hot to white (0.82 - 1.0) - dramatic hot spots
+    mask4 = t >= 0.82
+    ratio4 = (t[mask4] - 0.82) / 0.18
+    white = np.array([255, 255, 255])
+    result[mask4] = colors['hot'] + (white - colors['hot']) * ratio4[:, np.newaxis]
+    
+    return np.clip(result, 0, 255).astype(np.uint8)
+
+
+# ==================== FRAME GENERATION (VECTORIZED) ====================
+def generate_frame_vectorized(frame_num, w, h, radius, cx, cy, noise_engines, colors, fps):
+    """Generate single frame using fully vectorized operations - FAST"""
+    t = frame_num / fps
+    
+    noise1, noise2, noise3 = noise_engines
+    
+    # Create coordinate grids
+    y_grid, x_grid = np.mgrid[0:h, 0:w].astype(np.float32)
+    
+    # Calculate distance from center
+    dist = np.sqrt((x_grid - cx) ** 2 + (y_grid - cy) ** 2)
+    
+    # Create circular mask (inside orb)
+    mask = dist <= radius + 5
+    
+    # Only compute for pixels inside the orb
+    x_masked = x_grid[mask]
+    y_masked = y_grid[mask]
+    dist_masked = dist[mask]
+    
+    # Convert to polar coordinates for swirl effect
+    dx = x_masked - cx
+    dy = y_masked - cy
+    angle = np.arctan2(dy, dx)
+    r_norm = dist_masked / radius  # 0 at center, 1 at edge
+    
+    # DOMAIN WARPING - key to organic fluid look
+    # First pass: get base warp coordinates
+    warp_scale = 0.006
+    warp_x = noise1.fbm(x_masked * warp_scale, y_masked * warp_scale + t * 0.08, octaves=3)
+    warp_y = noise2.fbm(x_masked * warp_scale + 100, y_masked * warp_scale - t * 0.06, octaves=3)
+    
+    # Apply warp to coordinates (domain warping for organic flow)
+    warped_x = x_masked + warp_x * 80
+    warped_y = y_masked + warp_y * 80
+    
+    # Second pass: sample noise at warped coordinates
+    scale = 0.008
+    
+    # Main flowing silk layer - uses warped coordinates
+    silk1 = noise1.fbm(
+        warped_x * scale + t * 0.12,
+        warped_y * scale + t * 0.08,
+        octaves=5,
+        persistence=0.55
+    )
+    
+    # Second warp pass for more complexity
+    warp2_x = noise2.fbm(warped_x * scale * 0.7, warped_y * scale * 0.7 - t * 0.05, octaves=3)
+    warp2_y = noise3.fbm(warped_x * scale * 0.7 + 50, warped_y * scale * 0.7 + t * 0.04, octaves=3)
+    
+    double_warped_x = warped_x + warp2_x * 50
+    double_warped_y = warped_y + warp2_y * 50
+    
+    # Deep silk layer with double warping
+    silk2 = noise2.fbm(
+        double_warped_x * scale * 1.2 - t * 0.1,
+        double_warped_y * scale * 1.2 + t * 0.07,
+        octaves=4,
+        persistence=0.5
+    )
+    
+    # Swirling vortex effect using polar coordinates
+    swirl_amount = (1 - r_norm) * 2.5  # More swirl at center
+    swirled_angle = angle + swirl_amount * np.sin(t * 0.5) + t * 0.3
+    swirl_pattern = noise3.fbm(
+        np.cos(swirled_angle) * r_norm * radius * scale + t * 0.15,
+        np.sin(swirled_angle) * r_norm * radius * scale,
+        octaves=4
+    )
+    
+    # Fine wispy detail
+    wisp = noise3.turbulence(
+        double_warped_x * scale * 2.5 + t * 0.2,
+        double_warped_y * scale * 2.5 - t * 0.15,
+        octaves=3
+    ) * 0.3
+    
+    # Combine layers with emphasis on smooth flow
+    density = (
+        silk1 * 0.35 +           # Main silk flow
+        silk2 * 0.30 +           # Secondary depth
+        swirl_pattern * 0.25 +   # Swirl motion
+        wisp * 0.10              # Fine detail
+    )
+    
+    # Normalize and add contrast
+    density = (density + 0.5)
+    
+    # Apply S-curve for more dramatic contrast
+    density = np.clip(density, 0, 1)
+    density = density * density * (3 - 2 * density)  # Smoothstep for natural contrast
+    
+    # Add brightness variation based on flow direction (fake lighting)
+    flow_brightness = noise1.fbm(
+        warped_x * scale * 0.5 + t * 0.05,
+        warped_y * scale * 0.5,
+        octaves=2
+    ) * 0.2
+    density += flow_brightness
+    
+    # Create "hot spots" - bright concentrated areas
+    hotspot = noise2.fbm(
+        double_warped_x * scale * 0.8 - t * 0.06,
+        double_warped_y * scale * 0.8 + t * 0.04,
+        octaves=3
+    )
+    hotspot = np.clip(hotspot + 0.3, 0, 1) ** 3  # Power curve for concentrated bright spots
+    density += hotspot * 0.15
+    
+    # Edge darkening (vignette inside orb) - stronger near edges
+    edge_vignette = 1.0 - (r_norm ** 1.5) * 0.5
+    density *= np.clip(edge_vignette, 0.3, 1.0)
+    
+    # Smooth soft edge falloff at orb boundary
+    edge_falloff = np.clip((radius - dist_masked) / 25, 0, 1)
+    edge_falloff = edge_falloff ** 0.7  # Smoother falloff
+    density *= edge_falloff
+    
+    # Final clamp
+    density = np.clip(density, 0, 1)
+    
+    # Map density to colors
+    rgb_masked = colormap_vectorized(density, colors)
+    
+    # Create output image array
+    img_array = np.zeros((h, w, 3), dtype=np.uint8)
+    img_array[mask] = rgb_masked
+    
+    # Create PIL image
+    img = Image.fromarray(img_array, 'RGB')
+    
+    # Slight blur for smoother silk look
+    img = img.filter(ImageFilter.GaussianBlur(radius=1.2))
+    
+    # Add glow effect
+    glow = create_glow_layer(w, h, radius, cx, cy, colors['glow'], glow_size=50)
+    
+    # Composite
+    result = Image.new('RGBA', (w, h), (0, 0, 0, 255))
+    result = Image.alpha_composite(result, glow)
+    result = Image.alpha_composite(result, img.convert('RGBA'))
+    
+    return result.convert('RGB')
+
+
+def create_glow_layer(w, h, radius, center_x, center_y, glow_color, glow_size=60):
+    """Create outer glow effect"""
+    glow = Image.new('RGBA', (w, h), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(glow)
+    
+    # Multiple concentric rings with decreasing opacity
+    for i in range(glow_size, 0, -2):
+        alpha = int(100 * (1 - i / glow_size) ** 1.5)
+        r = radius + i
+        color = (*glow_color, alpha)
+        draw.ellipse([center_x - r, center_y - r, center_x + r, center_y + r], fill=color)
+    
+    return glow.filter(ImageFilter.GaussianBlur(radius=glow_size // 3))
+
+
+# ==================== VIDEO GENERATION ====================
 def get_duration(audio):
+    """Get audio duration using ffprobe"""
     r = subprocess.run(['ffprobe', '-v', 'error', '-show_entries', 'format=duration',
                         '-of', 'default=noprint_wrappers=1:nokey=1', audio],
                        capture_output=True, text=True)
     return float(r.stdout.strip())
 
-def generate_background(output_path='silk_background.mp4', duration=10, width=1920, height=1080):
-    """Generate a flowing silk-like background animation"""
-    print("🎨 Generating silk background (this only happens once)...")
-    
-    # Create flowing, organic patterns using FFmpeg's geq filter
-    # Simulates silk-like waves with sine and time-based animation
-    filt = (
-        f"color=c=black:s={width}x{height}:d={duration},"
-        f"geq="
-        f"r='128+127*sin((X/30-T*2))*sin((Y/30+T*1.5))':"
-        f"g='128+127*sin((X/25+T*1.8))*sin((Y/35-T*2.2))':"
-        f"b='128+127*sin((X/40-T*2.5))*sin((Y/25+T*1.7))',"
-        f"gblur=sigma=20,eq=contrast=1.3:brightness=0.1"
-    )
-    
-    cmd = ['ffmpeg', '-y', '-f', 'lavfi', '-i', filt, '-t', str(duration),
-           '-c:v', 'libx264', '-preset', 'medium', '-crf', '18', 
-           '-pix_fmt', 'yuv420p', output_path]
-    
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    
-    if result.returncode == 0 and Path(output_path).exists():
-        print(f"✅ Generated {output_path}")
-        return True
-    else:
-        print(f"❌ Failed to generate background: {result.stderr[-200:]}")
-        return False
 
-def create_video(audio, output, color='purple', resolution='1080p', start_time=0):
+def create_silk_orb_video(audio, output, resolution='1080p', fps=30, color_scheme='purple', start_time=0):
+    """Create beautiful fluid silk orb visualization"""
+    
     print("\n" + "="*60)
-    print("   🌟 SILK VISUALIZER 🌟")
+    print("   🔮 SILK FLUID ORB VISUALIZER 🔮")
     print("="*60 + "\n")
     
-    base = Path('silk_background.mp4')
     audio_path = Path(audio)
-    
-    # Auto-generate background if missing
-    if not base.exists():
-        print("⚠️  silk_background.mp4 not found; generating a fallback background...")
-        if not generate_background(str(base), duration=10):
-            print("❌ Could not generate background!")
-            return False
-    
     if not audio_path.exists():
         print(f"❌ Audio '{audio}' not found!")
         return False
     
-    res_map = {'720p': (1280, 720), '1080p': (1920, 1080), '2k': (2560, 1440), '4k': (3840, 2160)}
-    w, h = res_map.get(resolution, (1920, 1080))
+    # Resolution presets (9:10 portrait like reference)
+    res_map = {
+        '720p': (720, 800),
+        '1080p': (1080, 1200),
+        '2k': (1440, 1600),
+        '4k': (2160, 2400),
+        '4k+': (3456, 3840),  # Matches reference exactly
+    }
+    w, h = res_map.get(resolution, (1080, 1200))
     
     full_duration = get_duration(audio)
     duration = full_duration - start_time
+    total_frames = int(duration * fps)
+    
+    colors = COLOR_SCHEMES.get(color_scheme, COLOR_SCHEMES['purple'])
     
     print(f"📁 Audio: {audio_path.name}")
-    if start_time > 0:
-        print(f"⏱️  Trim: {start_time}s → {full_duration:.1f}s ({duration:.1f}s)")
-    else:
-        print(f"⏱️  Duration: {duration:.1f}s")
-    print(f"🎨 Color: {color}")
-    print(f"📐 Resolution: {w}x{h}")
+    print(f"⏱️  Duration: {duration:.1f}s ({total_frames} frames)")
+    print(f"📐 Resolution: {w}x{h} @ {fps}fps")
+    print(f"🎨 Color Scheme: {color_scheme}")
+    print()
     
-    # Check if using dynamic palette
-    if color in COLOR_PALETTES:
-        print(f"🌈 Dynamic Transitions: {len(COLOR_PALETTES[color])} colors")
+    # Orb parameters
+    radius = int(min(w, h) * 0.42)
+    cx, cy = w // 2, h // 2
+    
+    # Create temp directory for frames
+    temp_dir = tempfile.mkdtemp(prefix='silk_frames_')
+    print(f"📂 Temp frames: {temp_dir}")
+    
+    try:
+        # Initialize noise engines (once, reused for all frames)
+        noise_engines = (
+            VectorizedNoise(seed=42),
+            VectorizedNoise(seed=137),
+            VectorizedNoise(seed=256)
+        )
+        
+        # Generate frames
+        print("\n🎨 Generating fluid frames...")
+        
+        for frame_num in range(total_frames):
+            frame_path = os.path.join(temp_dir, f"frame_{frame_num:06d}.png")
+            frame = generate_frame_vectorized(frame_num, w, h, radius, cx, cy, noise_engines, colors, fps)
+            frame.save(frame_path, 'PNG')
+            
+            # Progress
+            progress = (frame_num + 1) / total_frames * 100
+            elapsed_sec = frame_num / fps
+            print(f"\r   🖼️  Frame {frame_num + 1}/{total_frames} ({progress:.1f}%) - {elapsed_sec:.1f}s", end='', flush=True)
+        
+        print("\n\n🎬 Encoding video with FFmpeg...")
+        
+        # Combine frames with audio using FFmpeg
+        cmd = [
+            'ffmpeg', '-y',
+            '-framerate', str(fps),
+            '-i', os.path.join(temp_dir, 'frame_%06d.png'),
+            '-ss', str(start_time),
+            '-i', audio,
+            '-c:v', 'libx264',
+            '-preset', 'slow',
+            '-crf', '18',
+            '-pix_fmt', 'yuv420p',
+            '-profile:v', 'high',
+            '-level', '4.2',
+            '-c:a', 'aac',
+            '-b:a', '256k',
+            '-shortest',
+            '-movflags', '+faststart',
+            output
+        ]
+        
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        for line in proc.stdout:
+            if 'frame=' in line:
+                match = re.search(r'frame=\s*(\d+)', line)
+                if match:
+                    encoded = int(match.group(1))
+                    pct = min(100, encoded / total_frames * 100)
+                    print(f"\r   📹 Encoding: {encoded}/{total_frames} ({pct:.1f}%)", end='', flush=True)
+        
+        proc.wait()
         print()
-        return create_dynamic_video(audio, output, color, resolution, start_time, w, h, duration, base)
-    
-    # Static color mode
-    print()
-    c = COLORS[color]
-    pulse = "(1.0 + 0.35*sin(T*15.7))"  # Beat pulse
-    
-    # BUTTERY SMOOTH - 30fps is the sweet spot for smoothness + speed
-    fps_rate = 30
-    
-    filt = (
-        f"[0:v]scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h},"
-        f"fps={fps_rate}:round=near[s];"
-        f"[s]split=2[bg][fg];"
-        f"[fg]lumakey=threshold=0.2:tolerance=0.3:softness=0.1[k];"
-        f"[k]hue=h={c['h']}:s={c['s']},eq=saturation={c['s']}:brightness={c['b']}:contrast={c['c']},"
-        f"colorchannelmixer=rr={c['r']}:gg={c['g']}:bb={c['b2']}[col];"
-        f"[bg][col]overlay=0:0[out]"
-    )
-    
-    print("🎬 Rendering...")
-    
-    # BUTTERY SMOOTH settings - balanced speed + quality
-    preset = 'veryfast'  # Fast but smooth encoding
-    crf = 21  # Better quality for smooth playback
-    
-    cmd = ['ffmpeg', '-y', 
-           '-stream_loop', '-1', '-i', str(base), 
-           '-ss', str(start_time), '-i', audio,
-           '-filter_complex', filt, 
-           '-map', '[out]', '-map', '1:a',
-           '-c:v', 'libx264', '-preset', preset, '-crf', str(crf), 
-           '-pix_fmt', 'yuv420p', '-profile:v', 'high', '-level', '4.2',
-           '-x264-params', 'ref=4:bframes=3:b-adapt=2:direct=auto:me=umh:subme=7:rc-lookahead=50',
-           '-c:a', 'aac', '-b:a', '192k', 
-           '-t', str(duration), '-movflags', '+faststart', output]
-    
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-    for line in proc.stdout:
-        if 'time=' in line:
-            m = re.search(r'time=(\d+):(\d+):(\d+\.\d+)', line)
-            if m:
-                h, mins, s = int(m.group(1)), int(m.group(2)), float(m.group(3))
-                elapsed = h * 3600 + mins * 60 + s
-                progress = min(100, (elapsed / duration) * 100)
-                remaining = max(0, duration - elapsed)
-                print(f"\r   ⏳ {m.group(0).split('=')[1]} | {progress:.1f}% | {remaining:.1f}s left", end='', flush=True)
-    proc.wait()
-    print()
-    
-    if proc.returncode == 0 and Path(output).exists():
-        size = Path(output).stat().st_size / (1024*1024)
-        print(f"\n✅ DONE! {output} ({size:.1f} MB)\n")
-        return True
-    print("❌ Failed!")
-    return False
+        
+        if proc.returncode == 0 and Path(output).exists():
+            size = Path(output).stat().st_size / (1024 * 1024)
+            print(f"\n✅ SUCCESS! {output} ({size:.1f} MB)")
+            return True
+        else:
+            print("❌ FFmpeg encoding failed!")
+            return False
+            
+    finally:
+        # Cleanup temp frames
+        print(f"\n🧹 Cleaning up temp files...")
+        shutil.rmtree(temp_dir, ignore_errors=True)
 
-def create_dynamic_video(audio, output, palette_name, resolution, start_time, w, h, duration, base):
-    """Create video with smooth color transitions based on audio dynamics"""
-    palette = COLOR_PALETTES[palette_name]
-    
-    # Use a simpler approach: pick one color from palette and vary it
-    # This avoids complex expression parsing issues
-    primary_color = palette[0]  # Use first color as base
-    
-    # Simple approach: use static hue with dynamic RGB modulation
-    hue_val = primary_color['h']
-    
-    # Create pulsing effect with the primary color values
-    pulse = "(1.0+0.5*sin(T*15.7))"  # Beat pulse
-    
-    # Add slow color drift for variety
-    drift_r = f"(1.0+0.3*sin(T*0.05))"
-    drift_g = f"(1.0+0.3*sin(T*0.07))"
-    drift_b = f"(1.0+0.3*sin(T*0.09))"
-    
-    # BUTTERY SMOOTH - 30fps is the sweet spot for smoothness + speed
-    fps_rate = 30
-    
-    filt = (
-        f"[0:v]scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h},"
-        f"fps={fps_rate}:round=near[s];"
-        f"[s]split=2[bg][fg];"
-        f"[fg]lumakey=threshold=0.2:tolerance=0.3:softness=0.1[k];"
-        f"[k]hue=h={hue_val}:s=6,eq=saturation=6:brightness=0.35:contrast=1.6,"
-        f"colorchannelmixer=rr={primary_color['r']}:gg={primary_color['g']}:bb={primary_color['b']}[col];"
-        f"[bg][col]overlay=0:0[out]"
-    )
-    
-    print("🎬 Rendering with dynamic transitions...")
-    
-    # BUTTERY SMOOTH settings - balanced speed + quality
-    preset = 'veryfast'  # Fast but smooth encoding
-    crf = 21  # Better quality for smooth playback
-    
-    cmd = ['ffmpeg', '-y', 
-           '-stream_loop', '-1', '-i', str(base), 
-           '-ss', str(start_time), '-i', audio,
-           '-filter_complex', filt, 
-           '-map', '[out]', '-map', '1:a',
-           '-c:v', 'libx264', '-preset', preset, '-crf', str(crf), 
-           '-pix_fmt', 'yuv420p', '-profile:v', 'high', '-level', '4.2',
-           '-x264-params', 'ref=4:bframes=3:b-adapt=2:direct=auto:me=umh:subme=7:rc-lookahead=50',
-           '-c:a', 'aac', '-b:a', '192k', 
-           '-t', str(duration), '-movflags', '+faststart', output]
-    
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-    for line in proc.stdout:
-        if 'time=' in line:
-            m = re.search(r'time=(\d+):(\d+):(\d+\.\d+)', line)
-            if m:
-                h, mins, s = int(m.group(1)), int(m.group(2)), float(m.group(3))
-                elapsed = h * 3600 + mins * 60 + s
-                progress = min(100, (elapsed / duration) * 100)
-                remaining = max(0, duration - elapsed)
-                print(f"\r   ⏳ {m.group(0).split('=')[1]} | {progress:.1f}% | {remaining:.1f}s left", end='', flush=True)
-    proc.wait()
-    print()
-    
-    if proc.returncode == 0 and Path(output).exists():
-        size = Path(output).stat().st_size / (1024*1024)
-        print(f"\n✅ DONE! {output} ({size:.1f} MB)\n")
-        return True
-    print("❌ Failed!")
-    return False
 
+# ==================== BATCH PROCESSING ====================
+def process_batch(audio_files, resolution='1080p', fps=30, color_scheme='purple'):
+    """Process multiple audio files"""
+    print("\n" + "="*60)
+    print("   🎵 BATCH PROCESSING")
+    print("="*60)
+    print(f"\n📋 Files to process: {len(audio_files)}")
+    
+    results = []
+    for i, audio in enumerate(audio_files, 1):
+        print(f"\n{'─'*50}")
+        print(f"📌 [{i}/{len(audio_files)}] Processing: {Path(audio).name}")
+        print('─'*50)
+        
+        output = f"silk_{Path(audio).stem}.mp4"
+        success = create_silk_orb_video(audio, output, resolution, fps, color_scheme)
+        results.append((audio, output, success))
+    
+    print("\n" + "="*60)
+    print("   📊 BATCH RESULTS")
+    print("="*60 + "\n")
+    
+    for audio, output, success in results:
+        status = "✅" if success else "❌"
+        print(f"  {status} {Path(audio).name} → {output}")
+    
+    return results
+
+
+# ==================== CLI ====================
 if __name__ == '__main__':
     if len(sys.argv) < 2:
-        print("Usage: python silk_visualizer.py <audio> [color] [resolution] [start_sec]")
-        print("\n🎨 Static Colors:", ', '.join(COLORS.keys()))
-        print("🌈 Dynamic Palettes:", ', '.join(COLOR_PALETTES.keys()))
-        print("   - volcano: Dark red → Blood red → Lava orange → Ember (smooth transitions)")
-        print("   - ocean: Deep blue → Cyan → Teal (wave-like flow)")
-        print("   - sunset: Purple → Pink → Orange (gradient shifts)")
-        print("\n📐 Resolutions: 720p, 1080p, 2k, 4k")
-        print("\n✨ Examples:")
-        print("  python silk_visualizer.py audio5.mp3 volcano 1080p 40  # Dynamic volcano reds")
-        print("  python silk_visualizer.py song.mp3 purple 1080p        # Static purple")
-        print("  python silk_visualizer.py track.mp3 ocean 4k           # Dynamic ocean blues")
+        print("""
+🔮 SILK FLUID ORB VISUALIZER
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Usage: python silk_visualizer.py <audio> [options]
+
+Options:
+  resolution   720p, 1080p, 2k, 4k, 4k+ (default: 1080p)
+  fps          Frame rate (default: 30, use 60 for smooth)
+  color        purple, lava, ocean, golden, emerald
+
+Examples:
+  python silk_visualizer.py song.mp3
+  python silk_visualizer.py track.mp3 1080p 60 purple
+  python silk_visualizer.py audio.mp3 4k 30 lava
+
+Batch Processing:
+  python silk_visualizer.py file1.mp3 file2.mp3 file3.mp3
+""")
         sys.exit(1)
     
-    audio = sys.argv[1]
-    color = sys.argv[2] if len(sys.argv) > 2 else 'purple'
-    res = sys.argv[3] if len(sys.argv) > 3 else '1080p'
-    start = float(sys.argv[4]) if len(sys.argv) > 4 else 0
+    # Check if batch mode (multiple audio files)
+    audio_files = [f for f in sys.argv[1:] if Path(f).exists() and f.endswith(('.mp3', '.wav', '.m4a', '.aac', '.mp4', '.flac'))]
     
-    # Check both static colors and dynamic palettes
-    if color not in COLORS and color not in COLOR_PALETTES:
-        print(f"⚠️  Unknown color '{color}', using 'purple'")
-        color = 'purple'
-    
-    output = f"silk_{Path(audio).stem}_{color}.mp4"
-    create_video(audio, output, color, res, start)
+    if len(audio_files) > 1:
+        # Batch mode
+        process_batch(audio_files)
+    elif len(audio_files) == 1:
+        # Single file mode
+        audio = audio_files[0]
+        res = sys.argv[2] if len(sys.argv) > 2 and not Path(sys.argv[2]).exists() else '1080p'
+        fps = int(sys.argv[3]) if len(sys.argv) > 3 else 30
+        color = sys.argv[4] if len(sys.argv) > 4 else 'purple'
+        
+        output = f"silk_{Path(audio).stem}.mp4"
+        create_silk_orb_video(audio, output, res, fps, color)
+    else:
+        print(f"❌ No valid audio files found in arguments!")
+        sys.exit(1)
