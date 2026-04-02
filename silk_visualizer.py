@@ -153,8 +153,8 @@ def create_video(audio, output, color='purple', resolution='1080p', start_time=0
         if 'time=' in line:
             m = re.search(r'time=(\d+):(\d+):(\d+\.\d+)', line)
             if m:
-                h, min, s = int(m.group(1)), int(m.group(2)), float(m.group(3))
-                elapsed = h * 3600 + min * 60 + s
+                h, mins, s = int(m.group(1)), int(m.group(2)), float(m.group(3))
+                elapsed = h * 3600 + mins * 60 + s
                 progress = min(100, (elapsed / duration) * 100)
                 remaining = max(0, duration - elapsed)
                 print(f"\r   ⏳ {m.group(0).split('=')[1]} | {progress:.1f}% | {remaining:.1f}s left", end='', flush=True)
@@ -222,8 +222,8 @@ def create_dynamic_video(audio, output, palette_name, resolution, start_time, w,
         if 'time=' in line:
             m = re.search(r'time=(\d+):(\d+):(\d+\.\d+)', line)
             if m:
-                h, min, s = int(m.group(1)), int(m.group(2)), float(m.group(3))
-                elapsed = h * 3600 + min * 60 + s
+                h, mins, s = int(m.group(1)), int(m.group(2)), float(m.group(3))
+                elapsed = h * 3600 + mins * 60 + s
                 progress = min(100, (elapsed / duration) * 100)
                 remaining = max(0, duration - elapsed)
                 print(f"\r   ⏳ {m.group(0).split('=')[1]} | {progress:.1f}% | {remaining:.1f}s left", end='', flush=True)
