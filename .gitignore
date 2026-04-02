@@ -1,4 +1,40 @@
-red-silk-final.html
-red_silk_final.mp4
-silk_background.mp4
+# Output videos
+*.mp4
+*.webm
+*.mov
+
+# Audio files (keep samples)
+# *.mp3
+# *.wav
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+silk_env/
+env/
+ENV/
+
+# OS
 .DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+Icon
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Temporary
+*.tmp
+*.temp
+temp_*
