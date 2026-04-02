@@ -1,0 +1,15 @@
+{
+  "name": "Silk Visualizer",
+  "image": "mcr.microsoft.com/devcontainers/python:3.11",
+  "features": {
+    "ghcr.io/devcontainers-contrib/features/ffmpeg-apt-get:1": {}
+  },
+  "postCreateCommand": "python3 --version && ffmpeg -version",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python"
+      ]
+    }
+  }
+}
