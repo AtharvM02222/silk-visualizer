@@ -46,6 +46,34 @@ def get_duration(audio):
                        capture_output=True, text=True)
     return float(r.stdout.strip())
 
+def generate_background(output_path='silk_background.mp4', duration=10, width=1920, height=1080):
+    """Generate a flowing silk-like background animation"""
+    print("🎨 Generating silk background (this only happens once)...")
+    
+    # Create flowing, organic patterns using FFmpeg's geq filter
+    # Simulates silk-like waves with Perlin noise and time-based animation
+    filt = (
+        f"color=c=black:s={width}x{height}:d={duration}[base];"
+        f"[base]geq="
+        f"r='128+127*sin((X/30-T*2))*sin((Y/30+T*1.5))':"
+        f"g='128+127*sin((X/25+T*1.8))*sin((Y/35-T*2.2))':"
+        f"b='128+127*sin((X/40-T*2.5))*sin((Y/25+T*1.7))',"
+        f"gblur=sigma=20,eq=contrast=1.3:brightness=0.1[out]"
+    )
+    
+    cmd = ['ffmpeg', '-y', '-f', 'lavfi', '-i', filt, '-t', str(duration),
+           '-c:v', 'libx264', '-preset', 'medium', '-crf', '18', 
+           '-pix_fmt', 'yuv420p', '-map', '[out]', output_path]
+    
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    
+    if result.returncode == 0 and Path(output_path).exists():
+        print(f"✅ Generated {output_path}")
+        return True
+    else:
+        print(f"❌ Failed to generate background: {result.stderr[-200:]}")
+        return False
+
 def create_video(audio, output, color='purple', resolution='1080p', start_time=0):
     print("\n" + "="*60)
     print("   🌟 SILK VISUALIZER 🌟")
@@ -54,9 +82,13 @@ def create_video(audio, output, color='purple', resolution='1080p', start_time=0
     base = Path('silk_background.mp4')
     audio_path = Path(audio)
     
+    # Auto-generate background if missing
     if not base.exists():
-        print("❌ silk_background.mp4 not found!")
-        return False
+        print("⚠️  silk_background.mp4 not found; generating a fallback background...")
+        if not generate_background(str(base), duration=10):
+            print("❌ Could not generate background!")
+            return False
+    
     if not audio_path.exists():
         print(f"❌ Audio '{audio}' not found!")
         return False
