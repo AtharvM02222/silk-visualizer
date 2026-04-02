@@ -51,19 +51,19 @@ def generate_background(output_path='silk_background.mp4', duration=10, width=19
     print("🎨 Generating silk background (this only happens once)...")
     
     # Create flowing, organic patterns using FFmpeg's geq filter
-    # Simulates silk-like waves with Perlin noise and time-based animation
+    # Simulates silk-like waves with sine and time-based animation
     filt = (
-        f"color=c=black:s={width}x{height}:d={duration}[base];"
-        f"[base]geq="
+        f"color=c=black:s={width}x{height}:d={duration},"
+        f"geq="
         f"r='128+127*sin((X/30-T*2))*sin((Y/30+T*1.5))':"
         f"g='128+127*sin((X/25+T*1.8))*sin((Y/35-T*2.2))':"
         f"b='128+127*sin((X/40-T*2.5))*sin((Y/25+T*1.7))',"
-        f"gblur=sigma=20,eq=contrast=1.3:brightness=0.1[out]"
+        f"gblur=sigma=20,eq=contrast=1.3:brightness=0.1"
     )
     
     cmd = ['ffmpeg', '-y', '-f', 'lavfi', '-i', filt, '-t', str(duration),
            '-c:v', 'libx264', '-preset', 'medium', '-crf', '18', 
-           '-pix_fmt', 'yuv420p', '-map', '[out]', output_path]
+           '-pix_fmt', 'yuv420p', output_path]
     
     result = subprocess.run(cmd, capture_output=True, text=True)
     
