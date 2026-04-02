@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-SILK VISUALIZER - Beat-synced silk animations
+SILK VISUALIZER - Beat-synced silk animations with dynamic color transitions
 Usage: python silk_visualizer.py <audio> [color] [resolution] [start_seconds]
 """
 
@@ -18,6 +18,26 @@ COLORS = {
     'cyan':   {'h': 185, 's': 6, 'b': 0.35, 'c': 1.5, 'r': 0.15, 'g': 1.5, 'b2': 1.7},
     'white':  {'h': 0,   's': 0, 'b': 0.6, 'c': 1.8, 'r': 1.5, 'g': 1.5, 'b2': 1.5},
     'pink':   {'h': 330, 's': 5, 'b': 0.35, 'c': 1.5, 'r': 1.7, 'g': 0.3, 'b2': 1.2},
+}
+
+# Dynamic color palettes with smooth transitions (volcano theme for audio5)
+COLOR_PALETTES = {
+    'volcano': [
+        {'name': 'dark_red',    'h': 0,   'r': 1.2, 'g': 0.15, 'b': 0.1},   # Deep volcanic red
+        {'name': 'blood_red',   'h': 355, 'r': 1.9, 'g': 0.2,  'b': 0.15},  # Intense blood red
+        {'name': 'lava_orange', 'h': 15,  'r': 2.0, 'g': 0.8,  'b': 0.1},   # Hot lava orange
+        {'name': 'ember_red',   'h': 5,   'r': 1.7, 'g': 0.35, 'b': 0.12},  # Burning ember
+    ],
+    'ocean': [
+        {'name': 'deep_blue',  'h': 210, 'r': 0.1,  'g': 0.3, 'b': 1.6},
+        {'name': 'cyan_wave',  'h': 190, 'r': 0.15, 'g': 1.2, 'b': 1.8},
+        {'name': 'teal',       'h': 175, 'r': 0.2,  'g': 1.5, 'b': 1.4},
+    ],
+    'sunset': [
+        {'name': 'purple',     'h': 280, 'r': 1.4, 'g': 0.2, 'b': 1.6},
+        {'name': 'pink',       'h': 330, 'r': 1.7, 'g': 0.3, 'b': 1.2},
+        {'name': 'orange',     'h': 30,  'r': 1.8, 'g': 1.0, 'b': 0.2},
+    ]
 }
 
 def get_duration(audio):
@@ -54,8 +74,15 @@ def create_video(audio, output, color='purple', resolution='1080p', start_time=0
         print(f"⏱️  Duration: {duration:.1f}s")
     print(f"🎨 Color: {color}")
     print(f"📐 Resolution: {w}x{h}")
-    print()
     
+    # Check if using dynamic palette
+    if color in COLOR_PALETTES:
+        print(f"🌈 Dynamic Transitions: {len(COLOR_PALETTES[color])} colors")
+        print()
+        return create_dynamic_video(audio, output, color, resolution, start_time, w, h, duration, base)
+    
+    # Static color mode
+    print()
     c = COLORS[color]
     pulse = "(1.0 + 0.35*sin(T*15.7))"  # Beat pulse
     
@@ -92,14 +119,86 @@ def create_video(audio, output, color='purple', resolution='1080p', start_time=0
     print("❌ Failed!")
     return False
 
+def create_dynamic_video(audio, output, palette_name, resolution, start_time, w, h, duration, base):
+    """Create video with smooth color transitions based on audio dynamics"""
+    palette = COLOR_PALETTES[palette_name]
+    
+    # Audio-reactive color transitions using volume analysis
+    # We'll create smooth interpolation between colors every 8-12 seconds
+    
+    # Build dynamic geq expressions with smooth transitions
+    # Use audio volume (via ASELECT) to drive color transitions
+    
+    # Simplified: cycle through colors with smooth sine-wave transitions
+    num_colors = len(palette)
+    cycle_speed = 0.08  # Slower = smoother transitions
+    
+    # Create smooth color interpolation using sine waves
+    color_funcs = []
+    for i, c in enumerate(palette):
+        phase = f"(sin(T*{cycle_speed} - {i * 2 / num_colors}*PI) + 1) / 2"  # Smooth 0-1 cycle
+        weight = f"pow({phase}, 3)"  # Cubic easing for smoother transitions
+        color_funcs.append((c, weight))
+    
+    # Build weighted color mixing expressions
+    r_expr = " + ".join([f"({w} * {c['r']})" for c, w in color_funcs])
+    g_expr = " + ".join([f"({w} * {c['g']})" for c, w in color_funcs])
+    b_expr = " + ".join([f"({w} * {c['b']})" for c, w in color_funcs])
+    
+    # Add beat pulse on top
+    pulse = "(1.0 + 0.4*sin(T*15.7))"
+    
+    # Dynamic hue rotation through all palette hues
+    hue_expr = " + ".join([f"({color_funcs[i][1]} * {c['h']})" for i, c in enumerate(palette)])
+    
+    filt = (
+        f"[0:v]scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h},fps=60[s];"
+        f"[s]split=2[bg][fg];"
+        f"[fg]lumakey=threshold=0.2:tolerance=0.3:softness=0.1[k];"
+        f"[k]hue=h='({hue_expr})':s=6,eq=saturation=6:brightness=0.35:contrast=1.6,"
+        f"geq="
+        f"r='clip(r(X,Y)*{pulse}*({r_expr}),0,255)':"
+        f"g='clip(g(X,Y)*{pulse}*({g_expr}),0,255)':"
+        f"b='clip(b(X,Y)*{pulse}*({b_expr}),0,255)'[col];"
+        f"[bg][col]overlay=0:0[out]"
+    )
+    
+    print("🎬 Rendering with dynamic transitions...")
+    
+    cmd = ['ffmpeg', '-y', '-stream_loop', '-1', '-i', str(base), '-ss', str(start_time), '-i', audio,
+           '-filter_complex', filt, '-map', '[out]', '-map', '1:a',
+           '-c:v', 'libx264', '-preset', 'slow', '-crf', '12', '-pix_fmt', 'yuv420p',
+           '-profile:v', 'high', '-level', '5.2', '-b:v', '40M', '-maxrate', '50M', '-bufsize', '100M',
+           '-c:a', 'aac', '-b:a', '320k', '-t', str(duration), '-movflags', '+faststart', output]
+    
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    for line in proc.stdout:
+        if 'time=' in line:
+            m = re.search(r'time=(\d+:\d+:\d+\.\d+)', line)
+            if m: print(f"\r   ⏳ {m.group(1)}", end='', flush=True)
+    proc.wait()
+    print()
+    
+    if proc.returncode == 0 and Path(output).exists():
+        size = Path(output).stat().st_size / (1024*1024)
+        print(f"\n✅ DONE! {output} ({size:.1f} MB)\n")
+        return True
+    print("❌ Failed!")
+    return False
+
 if __name__ == '__main__':
     if len(sys.argv) < 2:
         print("Usage: python silk_visualizer.py <audio> [color] [resolution] [start_sec]")
-        print("Colors:", ', '.join(COLORS.keys()))
-        print("Resolutions: 720p, 1080p, 2k, 4k")
-        print("\nExamples:")
-        print("  python silk_visualizer.py song.mp3 purple 1080p")
-        print("  python silk_visualizer.py audio.mp3 blue 4k 40  # Start at 40s")
+        print("\n🎨 Static Colors:", ', '.join(COLORS.keys()))
+        print("🌈 Dynamic Palettes:", ', '.join(COLOR_PALETTES.keys()))
+        print("   - volcano: Dark red → Blood red → Lava orange → Ember (smooth transitions)")
+        print("   - ocean: Deep blue → Cyan → Teal (wave-like flow)")
+        print("   - sunset: Purple → Pink → Orange (gradient shifts)")
+        print("\n📐 Resolutions: 720p, 1080p, 2k, 4k")
+        print("\n✨ Examples:")
+        print("  python silk_visualizer.py audio5.mp3 volcano 1080p 40  # Dynamic volcano reds")
+        print("  python silk_visualizer.py song.mp3 purple 1080p        # Static purple")
+        print("  python silk_visualizer.py track.mp3 ocean 4k           # Dynamic ocean blues")
         sys.exit(1)
     
     audio = sys.argv[1]
@@ -107,7 +206,9 @@ if __name__ == '__main__':
     res = sys.argv[3] if len(sys.argv) > 3 else '1080p'
     start = float(sys.argv[4]) if len(sys.argv) > 4 else 0
     
-    if color not in COLORS:
+    # Check both static colors and dynamic palettes
+    if color not in COLORS and color not in COLOR_PALETTES:
+        print(f"⚠️  Unknown color '{color}', using 'purple'")
         color = 'purple'
     
     output = f"silk_{Path(audio).stem}_{color}.mp4"
