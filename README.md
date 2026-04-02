@@ -1,32 +1,42 @@
-# 🌟 SILK VISUALIZER
+# 🔮 SILK FLUID ORB VISUALIZER
 
-Automated beat-synced silk animations with **dynamic color transitions** 🌈
+Beautiful fluid silk/lava orb visualization with organic flowing patterns.
 
 ## ✨ Features
-- **Dynamic Color Palettes**: Smooth transitions between multiple shades
-- **Audio-Reactive**: Pulsing effects synced to beats
-- **No Dependencies**: Pure Python + FFmpeg
-- **High Quality**: 60fps, up to 4K resolution
+- **Realistic Fluid Simulation**: Domain warping + Perlin noise for organic flow
+- **Glowing Orb Effect**: Centered sphere with soft edge glow
+- **Multiple Color Schemes**: Purple, Lava, Ocean, Golden, Emerald
+- **High Quality**: Up to 4K+ resolution, 60fps
 
 ## 🚀 Quick Start
 
 ```bash
-# Dynamic volcano reds (audio5.mp3 from 40s)
-python3 silk_visualizer.py audio5.mp3 volcano 1080p 40
+# Install dependencies
+pip install numpy pillow
 
-# Static purple color
-python3 silk_visualizer.py song.mp3 purple 1080p
+# Basic usage (1080p, 30fps, purple)
+python silk_visualizer.py audio.mp3
 
-# Dynamic ocean blues in 4K
-python3 silk_visualizer.py track.mp3 ocean 4k
+# 2K resolution with lava colors
+python silk_visualizer.py audio.mp3 2k 30 lava
+
+# 4K at 60fps
+python silk_visualizer.py audio.mp3 4k 60 purple
 ```
 
-## 🎨 Color Options
+## 📐 Resolutions
+- `720p` - 720x800 (fast preview)
+- `1080p` - 1080x1200 (default)
+- `2k` - 1440x1600 (recommended)
+- `4k` - 2160x2400 (high quality)
+- `4k+` - 3456x3840 (maximum)
 
-### 🌈 Dynamic Palettes (Smooth Transitions)
-- **volcano**: Dark red → Blood red → Lava orange → Ember red
-- **ocean**: Deep blue → Cyan wave → Teal
-- **sunset**: Purple → Pink → Orange
+## 🎨 Color Schemes
+- **purple**: Deep violet/magenta glow
+- **lava**: Orange/red molten flow
+- **ocean**: Deep blue/cyan
+- **golden**: Warm amber/gold
+- **emerald**: Green/teal
 
 ### 🎯 Static Colors
 - red, blue, purple, green, gold, cyan, white, pink
