@@ -2,7 +2,7 @@
 *.mp4
 *.webm
 *.mov
-
+!silk_audio5_ocean.mp4
 # Audio files (keep samples)
 # *.mp3
 # *.wav
