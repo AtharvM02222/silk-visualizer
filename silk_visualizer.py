@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
 """
-SILK FLUID ORB VISUALIZER - Realistic fluid simulation inside glowing sphere
-Matches the organic flowing silk/lava patterns from reference videos
+SILK FLUID ORB VISUALIZER - Audio-Reactive Beat-Synced Visualization
+Recreates the Resonation.io "Silk" effect with full spectrum audio reactivity
 
-Usage: python silk_visualizer.py <audio> [resolution] [fps] [color_scheme]
+Bass hits → dramatic sphere expansion/pulses
+Mids → flowing motion speed
+Highs → surface shimmer detail
+Transients → sharp "snap" deformations
+
+Usage: python silk_visualizer.py <audio> [resolution] [fps] [color_scheme] [sensitivity]
 """
 
 import subprocess
@@ -13,9 +18,207 @@ import re
 import math
 import tempfile
 import shutil
+import wave
+import struct
 from pathlib import Path
 import numpy as np
+from scipy import signal
+from scipy.ndimage import gaussian_filter1d
 from PIL import Image, ImageDraw, ImageFilter
+
+
+# ==================== AUDIO ANALYSIS MODULE ====================
+class AudioAnalyzer:
+    """
+    Extracts per-frame audio features for beat-reactive visualization.
+    Uses FFT-based spectral analysis with 3-band separation.
+    """
+    
+    def __init__(self, audio_path, fps=60, sensitivity=1.0):
+        self.fps = fps
+        self.sensitivity = sensitivity
+        self.audio_path = audio_path
+        
+        # Load and analyze audio
+        self._load_audio()
+        self._analyze_spectrum()
+        self._detect_onsets()
+        self._apply_envelope()
+        
+    def _load_audio(self):
+        """Load audio file using ffmpeg → WAV conversion"""
+        print("📊 Analyzing audio spectrum...")
+        
+        # Convert to mono WAV using ffmpeg
+        temp_wav = tempfile.mktemp(suffix='.wav')
+        cmd = [
+            'ffmpeg', '-y', '-i', str(self.audio_path),
+            '-ac', '1',  # mono
+            '-ar', '44100',  # 44.1kHz sample rate
+            '-f', 'wav',
+            temp_wav
+        ]
+        subprocess.run(cmd, capture_output=True, check=True)
+        
+        # Read WAV file
+        with wave.open(temp_wav, 'rb') as wf:
+            self.sample_rate = wf.getframerate()
+            n_frames = wf.getnframes()
+            raw_data = wf.readframes(n_frames)
+            
+        os.remove(temp_wav)
+        
+        # Convert to numpy array (16-bit signed integers → float)
+        self.audio_data = np.array(struct.unpack(f'{n_frames}h', raw_data), dtype=np.float32)
+        self.audio_data /= 32768.0  # Normalize to -1 to 1
+        
+        self.duration = len(self.audio_data) / self.sample_rate
+        self.total_frames = int(self.duration * self.fps)
+        self.samples_per_frame = self.sample_rate // self.fps
+        
+        print(f"   ⏱️  Duration: {self.duration:.1f}s, {self.total_frames} frames")
+        
+    def _analyze_spectrum(self):
+        """Extract 3-band energy (bass/mid/high) per frame using STFT"""
+        print("   🎵 Computing spectral analysis...")
+        
+        # Initialize arrays
+        self.bass = np.zeros(self.total_frames)
+        self.mid = np.zeros(self.total_frames)
+        self.high = np.zeros(self.total_frames)
+        self.raw_energy = np.zeros(self.total_frames)
+        
+        # FFT parameters
+        fft_size = 2048
+        hop_size = self.samples_per_frame
+        freqs = np.fft.rfftfreq(fft_size, 1/self.sample_rate)
+        
+        # Frequency band masks
+        bass_mask = freqs < 250  # Sub-bass + bass: 0-250Hz
+        mid_mask = (freqs >= 250) & (freqs < 4000)  # Mids: 250-4000Hz
+        high_mask = freqs >= 4000  # Highs: 4000Hz+
+        
+        # Hann window for smoother FFT
+        window = np.hanning(fft_size)
+        
+        for frame_idx in range(self.total_frames):
+            start = frame_idx * hop_size
+            end = start + fft_size
+            
+            if end > len(self.audio_data):
+                break
+                
+            # Get windowed segment
+            segment = self.audio_data[start:end] * window
+            
+            # Compute FFT magnitude
+            spectrum = np.abs(np.fft.rfft(segment))
+            
+            # Extract band energies (RMS-like)
+            self.bass[frame_idx] = np.sqrt(np.mean(spectrum[bass_mask] ** 2))
+            self.mid[frame_idx] = np.sqrt(np.mean(spectrum[mid_mask] ** 2))
+            self.high[frame_idx] = np.sqrt(np.mean(spectrum[high_mask] ** 2))
+            self.raw_energy[frame_idx] = np.sqrt(np.mean(spectrum ** 2))
+            
+        # Normalize each band to 0-1 with headroom
+        for band in [self.bass, self.mid, self.high, self.raw_energy]:
+            if band.max() > 0:
+                # Use 95th percentile for normalization (allows peaks > 1)
+                p95 = np.percentile(band, 95)
+                if p95 > 0:
+                    band /= p95
+                    
+    def _detect_onsets(self):
+        """Detect transients/onsets for 'snap' effects"""
+        print("   🥁 Detecting beat transients...")
+        
+        # Onset detection using spectral flux
+        self.onset_strength = np.zeros(self.total_frames)
+        
+        # Compute derivative of energy (onset = sudden increase)
+        energy_diff = np.diff(self.raw_energy, prepend=0)
+        
+        # Half-wave rectification (only positive changes = onsets)
+        self.onset_strength = np.maximum(0, energy_diff)
+        
+        # Also weight by bass (bass hits are more important)
+        bass_diff = np.diff(self.bass, prepend=0)
+        bass_onset = np.maximum(0, bass_diff)
+        
+        # Combine: 60% spectral flux, 40% bass onset
+        self.onset_strength = 0.6 * self.onset_strength + 0.4 * bass_onset
+        
+        # Normalize
+        if self.onset_strength.max() > 0:
+            self.onset_strength /= np.percentile(self.onset_strength, 98)
+            
+        # Peak picking: suppress non-peaks
+        peaks, _ = signal.find_peaks(self.onset_strength, height=0.3, distance=int(self.fps * 0.1))
+        
+        # Create impulse signal (sharp spike on peaks)
+        self.onset_impulse = np.zeros(self.total_frames)
+        self.onset_impulse[peaks] = self.onset_strength[peaks]
+        
+        print(f"   ✨ Found {len(peaks)} beat transients")
+        
+    def _apply_envelope(self):
+        """Apply attack/decay envelope for BUTTERY SMOOTH response"""
+        # SMOOTH: Slower attack, much longer decay for fluid motion
+        
+        # Apply heavy smoothing to each band for fluid motion
+        for band in [self.bass, self.mid, self.high]:
+            # Multi-pass smoothing for ultra-smooth transitions
+            smoothed = np.zeros_like(band)
+            smoothed[0] = band[0]
+            
+            for i in range(1, len(band)):
+                if band[i] > smoothed[i-1]:
+                    # Attack: gradual rise (not instant)
+                    alpha = 0.25  # Smooth attack (was 0.7)
+                else:
+                    # Decay: very slow fall for smooth trails
+                    alpha = 0.05  # Very slow decay (was 0.15)
+                smoothed[i] = alpha * band[i] + (1 - alpha) * smoothed[i-1]
+            
+            band[:] = smoothed
+        
+        # Additional Gaussian smoothing for extra smoothness
+        from scipy.ndimage import gaussian_filter1d
+        smooth_sigma = self.fps * 0.08  # ~80ms smoothing window
+        self.bass = gaussian_filter1d(self.bass, sigma=smooth_sigma)
+        self.mid = gaussian_filter1d(self.mid, sigma=smooth_sigma)
+        self.high = gaussian_filter1d(self.high, sigma=smooth_sigma)
+        
+        # Onset envelope: much longer, smoother decay for fluid pulses
+        decay_frames = int(self.fps * 0.5)  # 500ms decay (was 150ms)
+        decay_kernel = np.exp(-np.arange(decay_frames) / (decay_frames / 3))
+        self.onset_envelope = np.convolve(self.onset_impulse, decay_kernel, mode='same')
+        self.onset_envelope = gaussian_filter1d(self.onset_envelope, sigma=self.fps * 0.05)
+        self.onset_envelope = np.clip(self.onset_envelope, 0, 1.5)
+        
+    def get_frame_params(self, frame_idx):
+        """Get audio-reactive parameters for a specific frame - BUTTERY SMOOTH"""
+        if frame_idx >= self.total_frames:
+            frame_idx = self.total_frames - 1
+            
+        bass = np.clip(self.bass[frame_idx] * self.sensitivity, 0, 1.5)
+        mid = np.clip(self.mid[frame_idx] * self.sensitivity, 0, 1.5)
+        high = np.clip(self.high[frame_idx] * self.sensitivity, 0, 1.5)
+        onset = np.clip(self.onset_envelope[frame_idx] * self.sensitivity, 0, 1.2)
+        
+        return {
+            'bass': bass,
+            'mid': mid,
+            'high': high,
+            'onset': onset,
+            # BUTTERY SMOOTH: Gentler, more gradual parameters
+            'scale': 1.0 + bass * 0.15,  # Gentler scaling: 1.0-1.15 (was 1.0-1.25)
+            'warp_intensity': 60 + bass * 50,  # Softer deformation (was 80 + bass*100)
+            'flow_speed_mult': 1.0 + mid * 0.4,  # Gentler flow variation (was 0.8)
+            'detail_mult': 1.0 + high * 0.6,  # Subtler detail (was 1.2)
+            'snap_intensity': onset * 0.6,  # Much softer snap (was 1.5)
+            'glow_boost': 1.0 + bass * 0.3 + onset * 0.2,  # Gentler glow (was 0.6/0.4)
+        }
 
 # ==================== VECTORIZED PERLIN NOISE ====================
 class VectorizedNoise:
@@ -169,10 +372,39 @@ def colormap_vectorized(t, colors):
     return np.clip(result, 0, 255).astype(np.uint8)
 
 
-# ==================== FRAME GENERATION (VECTORIZED) ====================
-def generate_frame_vectorized(frame_num, w, h, radius, cx, cy, noise_engines, colors, fps):
-    """Generate single frame using fully vectorized operations - FAST"""
+# ==================== FRAME GENERATION (AUDIO-REACTIVE) ====================
+def generate_frame_vectorized(frame_num, w, h, base_radius, cx, cy, noise_engines, colors, fps, audio_params=None):
+    """
+    Generate single frame with audio-reactive beat synchronization.
+    
+    Audio parameters modulate:
+    - Sphere scale (bass → expansion)
+    - Deformation intensity (bass + onset → warping)
+    - Flow speed (mids → motion)
+    - Detail level (highs → fine texture)
+    - Snap impulse (onsets → sharp deformation)
+    """
     t = frame_num / fps
+    
+    # Default audio params if not provided (for testing without audio)
+    if audio_params is None:
+        audio_params = {
+            'bass': 0, 'mid': 0, 'high': 0, 'onset': 0,
+            'scale': 1.0, 'warp_intensity': 80, 'flow_speed_mult': 1.0,
+            'detail_mult': 1.0, 'snap_intensity': 0, 'glow_boost': 1.0
+        }
+    
+    # Extract audio-reactive parameters
+    scale_factor = audio_params['scale']
+    warp_intensity = audio_params['warp_intensity']
+    flow_mult = audio_params['flow_speed_mult']
+    detail_mult = audio_params['detail_mult']
+    snap = audio_params['snap_intensity']
+    glow_boost = audio_params['glow_boost']
+    bass = audio_params['bass']
+    
+    # Apply audio-reactive scaling to radius
+    radius = int(base_radius * scale_factor)
     
     noise1, noise2, noise3 = noise_engines
     
@@ -182,112 +414,149 @@ def generate_frame_vectorized(frame_num, w, h, radius, cx, cy, noise_engines, co
     # Calculate distance from center
     dist = np.sqrt((x_grid - cx) ** 2 + (y_grid - cy) ** 2)
     
-    # Create circular mask (inside orb)
-    mask = dist <= radius + 5
+    # Create circular mask with some padding for scaled radius
+    max_radius = int(base_radius * 1.4)  # Allow for expansion
+    mask = dist <= max_radius + 10
     
-    # Only compute for pixels inside the orb
+    # Only compute for pixels inside the extended orb area
     x_masked = x_grid[mask]
     y_masked = y_grid[mask]
     dist_masked = dist[mask]
     
-    # Convert to polar coordinates for swirl effect
+    # Convert to polar coordinates for swirl + deformation effects
     dx = x_masked - cx
     dy = y_masked - cy
     angle = np.arctan2(dy, dx)
     r_norm = dist_masked / radius  # 0 at center, 1 at edge
     
-    # DOMAIN WARPING - key to organic fluid look
-    # First pass: get base warp coordinates
-    warp_scale = 0.006
-    warp_x = noise1.fbm(x_masked * warp_scale, y_masked * warp_scale + t * 0.08, octaves=3)
-    warp_y = noise2.fbm(x_masked * warp_scale + 100, y_masked * warp_scale - t * 0.06, octaves=3)
+    # ===== BUTTERY SMOOTH RADIAL DEFORMATION =====
+    # Gentle, flowing deformation instead of sharp snaps
     
-    # Apply warp to coordinates (domain warping for organic flow)
-    warped_x = x_masked + warp_x * 80
-    warped_y = y_masked + warp_y * 80
+    # Base radial wobble from noise - slower, gentler
+    wobble_angle = noise1.fbm(angle * 2 + t * 0.15, t * 0.25, octaves=2) * 0.08
+    
+    # Smooth radial "pulse" on transients (no sharp oscillations)
+    snap_deform = snap * np.sin(angle * 2 + t * 3) * 0.05  # Slow, gentle wave
+    
+    # Bass-driven radial pulse - very smooth
+    bass_pulse = bass * np.sin(angle * 1.5 + t * 2) * 0.06
+    bass_pulse += bass * 0.03  # Gentle overall expansion
+    
+    # Combined radial deformation - subtle and smooth
+    radial_deform = 1.0 + wobble_angle + snap_deform + bass_pulse
+    
+    # Apply deformation to normalized radius
+    r_deformed = r_norm * radial_deform
+    
+    # ===== DOMAIN WARPING (BUTTERY SMOOTH) =====
+    warp_scale = 0.005  # Slightly larger scale for smoother patterns
+    base_flow = t * 0.06 * flow_mult  # Slower base flow
+    
+    warp_x = noise1.fbm(x_masked * warp_scale, y_masked * warp_scale + base_flow, octaves=4)
+    warp_y = noise2.fbm(x_masked * warp_scale + 100, y_masked * warp_scale - base_flow * 0.75, octaves=4)
+    
+    # Warp intensity - gentler response
+    warped_x = x_masked + warp_x * warp_intensity
+    warped_y = y_masked + warp_y * warp_intensity
     
     # Second pass: sample noise at warped coordinates
-    scale = 0.008
+    scale = 0.007  # Slightly larger for smoother patterns
+    flow_t = t * 0.08 * flow_mult  # Slower flow
     
     # Main flowing silk layer - uses warped coordinates
     silk1 = noise1.fbm(
-        warped_x * scale + t * 0.12,
-        warped_y * scale + t * 0.08,
+        warped_x * scale + flow_t,
+        warped_y * scale + flow_t * 0.67,
         octaves=5,
         persistence=0.55
     )
     
     # Second warp pass for more complexity
-    warp2_x = noise2.fbm(warped_x * scale * 0.7, warped_y * scale * 0.7 - t * 0.05, octaves=3)
-    warp2_y = noise3.fbm(warped_x * scale * 0.7 + 50, warped_y * scale * 0.7 + t * 0.04, octaves=3)
+    warp2_scale = scale * 0.7
+    warp2_x = noise2.fbm(warped_x * warp2_scale, warped_y * warp2_scale - t * 0.05 * flow_mult, octaves=3)
+    warp2_y = noise3.fbm(warped_x * warp2_scale + 50, warped_y * warp2_scale + t * 0.04 * flow_mult, octaves=3)
     
-    double_warped_x = warped_x + warp2_x * 50
-    double_warped_y = warped_y + warp2_y * 50
+    # Secondary warp intensity also audio-reactive
+    secondary_warp = 50 + bass * 40
+    double_warped_x = warped_x + warp2_x * secondary_warp
+    double_warped_y = warped_y + warp2_y * secondary_warp
     
     # Deep silk layer with double warping
     silk2 = noise2.fbm(
-        double_warped_x * scale * 1.2 - t * 0.1,
-        double_warped_y * scale * 1.2 + t * 0.07,
+        double_warped_x * scale * 1.2 - flow_t * 0.83,
+        double_warped_y * scale * 1.2 + flow_t * 0.58,
         octaves=4,
         persistence=0.5
     )
     
     # Swirling vortex effect using polar coordinates
-    swirl_amount = (1 - r_norm) * 2.5  # More swirl at center
-    swirled_angle = angle + swirl_amount * np.sin(t * 0.5) + t * 0.3
+    swirl_amount = (1 - r_deformed) * 2.5  # Use deformed radius
+    swirl_speed = 0.5 * flow_mult
+    swirled_angle = angle + swirl_amount * np.sin(t * swirl_speed) + t * 0.3 * flow_mult
     swirl_pattern = noise3.fbm(
-        np.cos(swirled_angle) * r_norm * radius * scale + t * 0.15,
-        np.sin(swirled_angle) * r_norm * radius * scale,
+        np.cos(swirled_angle) * r_deformed * radius * scale + t * 0.15 * flow_mult,
+        np.sin(swirled_angle) * r_deformed * radius * scale,
         octaves=4
     )
     
-    # Fine wispy detail
+    # Fine wispy detail (intensity scales with high frequencies)
+    detail_scale = scale * 2.5 * detail_mult
     wisp = noise3.turbulence(
-        double_warped_x * scale * 2.5 + t * 0.2,
-        double_warped_y * scale * 2.5 - t * 0.15,
+        double_warped_x * detail_scale + t * 0.2 * flow_mult,
+        double_warped_y * detail_scale - t * 0.15 * flow_mult,
         octaves=3
-    ) * 0.3
+    ) * 0.3 * detail_mult
     
-    # Combine layers with emphasis on smooth flow
+    # ===== COMBINE LAYERS (AUDIO-WEIGHTED) =====
+    # On beats, emphasize the flowing layers more
+    silk_weight = 0.35 + bass * 0.1
+    swirl_weight = 0.25 + snap * 0.15
+    
     density = (
-        silk1 * 0.35 +           # Main silk flow
-        silk2 * 0.30 +           # Secondary depth
-        swirl_pattern * 0.25 +   # Swirl motion
-        wisp * 0.10              # Fine detail
+        silk1 * silk_weight +        # Main silk flow (boosted on bass)
+        silk2 * 0.30 +               # Secondary depth
+        swirl_pattern * swirl_weight + # Swirl motion (boosted on snap)
+        wisp * 0.10                  # Fine detail
     )
     
     # Normalize and add contrast
     density = (density + 0.5)
     
-    # Apply S-curve for more dramatic contrast
+    # BUTTERY SMOOTH: Gentler contrast curve
     density = np.clip(density, 0, 1)
-    density = density * density * (3 - 2 * density)  # Smoothstep for natural contrast
+    contrast_power = 1.8 + bass * 0.2  # Gentler contrast variation
+    density = np.power(density, 1/contrast_power) * density * (3 - 2 * density)
     
-    # Add brightness variation based on flow direction (fake lighting)
+    # Add brightness variation based on flow direction
     flow_brightness = noise1.fbm(
-        warped_x * scale * 0.5 + t * 0.05,
+        warped_x * scale * 0.5 + t * 0.04 * flow_mult,
         warped_y * scale * 0.5,
         octaves=2
-    ) * 0.2
+    ) * 0.15  # Gentler brightness variation
     density += flow_brightness
     
-    # Create "hot spots" - bright concentrated areas
+    # Create "hot spots" - gentler intensity
     hotspot = noise2.fbm(
-        double_warped_x * scale * 0.8 - t * 0.06,
-        double_warped_y * scale * 0.8 + t * 0.04,
+        double_warped_x * scale * 0.8 - t * 0.04 * flow_mult,
+        double_warped_y * scale * 0.8 + t * 0.03 * flow_mult,
         octaves=3
     )
-    hotspot = np.clip(hotspot + 0.3, 0, 1) ** 3  # Power curve for concentrated bright spots
-    density += hotspot * 0.15
+    hotspot_intensity = 0.12 + bass * 0.1 + snap * 0.08  # Gentler hotspots
+    hotspot = np.clip(hotspot + 0.3, 0, 1) ** 3
+    density += hotspot * hotspot_intensity
     
-    # Edge darkening (vignette inside orb) - stronger near edges
-    edge_vignette = 1.0 - (r_norm ** 1.5) * 0.5
-    density *= np.clip(edge_vignette, 0.3, 1.0)
+    # Edge darkening (vignette inside orb)
+    edge_vignette = 1.0 - (r_deformed ** 1.5) * 0.45  # Slightly softer vignette
+    density *= np.clip(edge_vignette, 0.35, 1.0)
     
-    # Smooth soft edge falloff at orb boundary
-    edge_falloff = np.clip((radius - dist_masked) / 25, 0, 1)
-    edge_falloff = edge_falloff ** 0.7  # Smoother falloff
+    # Smooth soft edge falloff at orb boundary (using deformed radius)
+    edge_dist = radius * radial_deform - dist_masked
+    edge_falloff = np.clip(edge_dist / 35, 0, 1)  # Softer edge
+    edge_falloff = edge_falloff ** 0.6
     density *= edge_falloff
+    
+    # Beat-reactive brightness boost - gentler
+    density *= (1.0 + bass * 0.15 + snap * 0.1)
     
     # Final clamp
     density = np.clip(density, 0, 1)
@@ -302,11 +571,13 @@ def generate_frame_vectorized(frame_num, w, h, radius, cx, cy, noise_engines, co
     # Create PIL image
     img = Image.fromarray(img_array, 'RGB')
     
-    # Slight blur for smoother silk look
-    img = img.filter(ImageFilter.GaussianBlur(radius=1.2))
+    # BUTTERY SMOOTH: More blur for silky soft look
+    blur_radius = 1.8  # Consistent soft blur (was variable 0.8-1.2)
+    img = img.filter(ImageFilter.GaussianBlur(radius=blur_radius))
     
-    # Add glow effect
-    glow = create_glow_layer(w, h, radius, cx, cy, colors['glow'], glow_size=50)
+    # Add glow effect (gentler intensity variation)
+    glow_size = int(50 + 15 * glow_boost)  # Gentler glow scaling
+    glow = create_glow_layer(w, h, radius, cx, cy, colors['glow'], glow_size=glow_size, intensity=glow_boost)
     
     # Composite
     result = Image.new('RGBA', (w, h), (0, 0, 0, 255))
@@ -316,14 +587,16 @@ def generate_frame_vectorized(frame_num, w, h, radius, cx, cy, noise_engines, co
     return result.convert('RGB')
 
 
-def create_glow_layer(w, h, radius, center_x, center_y, glow_color, glow_size=60):
-    """Create outer glow effect"""
+def create_glow_layer(w, h, radius, center_x, center_y, glow_color, glow_size=60, intensity=1.0):
+    """Create outer glow effect with audio-reactive intensity"""
     glow = Image.new('RGBA', (w, h), (0, 0, 0, 0))
     draw = ImageDraw.Draw(glow)
     
     # Multiple concentric rings with decreasing opacity
+    base_alpha = int(100 * intensity)
     for i in range(glow_size, 0, -2):
-        alpha = int(100 * (1 - i / glow_size) ** 1.5)
+        alpha = int(base_alpha * (1 - i / glow_size) ** 1.5)
+        alpha = min(255, alpha)
         r = radius + i
         color = (*glow_color, alpha)
         draw.ellipse([center_x - r, center_y - r, center_x + r, center_y + r], fill=color)
@@ -340,11 +613,11 @@ def get_duration(audio):
     return float(r.stdout.strip())
 
 
-def create_silk_orb_video(audio, output, resolution='1080p', fps=30, color_scheme='purple', start_time=0):
-    """Create beautiful fluid silk orb visualization"""
+def create_silk_orb_video(audio, output, resolution='1080p', fps=60, color_scheme='purple', start_time=0, sensitivity=1.0):
+    """Create audio-reactive silk orb visualization with beat synchronization"""
     
     print("\n" + "="*60)
-    print("   🔮 SILK FLUID ORB VISUALIZER 🔮")
+    print("   🔮 SILK VISUALIZER - AUDIO REACTIVE 🔮")
     print("="*60 + "\n")
     
     audio_path = Path(audio)
@@ -362,20 +635,27 @@ def create_silk_orb_video(audio, output, resolution='1080p', fps=30, color_schem
     }
     w, h = res_map.get(resolution, (1080, 1200))
     
-    full_duration = get_duration(audio)
-    duration = full_duration - start_time
-    total_frames = int(duration * fps)
-    
     colors = COLOR_SCHEMES.get(color_scheme, COLOR_SCHEMES['purple'])
     
     print(f"📁 Audio: {audio_path.name}")
-    print(f"⏱️  Duration: {duration:.1f}s ({total_frames} frames)")
     print(f"📐 Resolution: {w}x{h} @ {fps}fps")
     print(f"🎨 Color Scheme: {color_scheme}")
+    print(f"🎚️  Sensitivity: {sensitivity}")
+    print()
+    
+    # ===== AUDIO ANALYSIS =====
+    try:
+        audio_analyzer = AudioAnalyzer(audio_path, fps=fps, sensitivity=sensitivity)
+        total_frames = audio_analyzer.total_frames
+    except Exception as e:
+        print(f"❌ Audio analysis failed: {e}")
+        return False
+    
+    print(f"⏱️  Duration: {audio_analyzer.duration:.1f}s ({total_frames} frames)")
     print()
     
     # Orb parameters
-    radius = int(min(w, h) * 0.42)
+    base_radius = int(min(w, h) * 0.42)
     cx, cy = w // 2, h // 2
     
     # Create temp directory for frames
@@ -390,18 +670,27 @@ def create_silk_orb_video(audio, output, resolution='1080p', fps=30, color_schem
             VectorizedNoise(seed=256)
         )
         
-        # Generate frames
-        print("\n🎨 Generating fluid frames...")
+        # Generate frames with audio reactivity
+        print("\n🎨 Generating beat-synced frames...")
         
         for frame_num in range(total_frames):
             frame_path = os.path.join(temp_dir, f"frame_{frame_num:06d}.png")
-            frame = generate_frame_vectorized(frame_num, w, h, radius, cx, cy, noise_engines, colors, fps)
+            
+            # Get audio-reactive parameters for this frame
+            audio_params = audio_analyzer.get_frame_params(frame_num)
+            
+            # Generate frame with audio reactivity
+            frame = generate_frame_vectorized(
+                frame_num, w, h, base_radius, cx, cy, 
+                noise_engines, colors, fps, audio_params
+            )
             frame.save(frame_path, 'PNG')
             
-            # Progress
+            # Progress with audio debug info
             progress = (frame_num + 1) / total_frames * 100
             elapsed_sec = frame_num / fps
-            print(f"\r   🖼️  Frame {frame_num + 1}/{total_frames} ({progress:.1f}%) - {elapsed_sec:.1f}s", end='', flush=True)
+            bass_bar = "█" * int(audio_params['bass'] * 10)
+            print(f"\r   🖼️  Frame {frame_num + 1}/{total_frames} ({progress:.1f}%) - {elapsed_sec:.1f}s |{bass_bar:<10}|", end='', flush=True)
         
         print("\n\n🎬 Encoding video with FFmpeg...")
         
@@ -452,10 +741,10 @@ def create_silk_orb_video(audio, output, resolution='1080p', fps=30, color_schem
 
 
 # ==================== BATCH PROCESSING ====================
-def process_batch(audio_files, resolution='1080p', fps=30, color_scheme='purple'):
+def process_batch(audio_files, resolution='1080p', fps=60, color_scheme='purple', sensitivity=1.0):
     """Process multiple audio files"""
     print("\n" + "="*60)
-    print("   🎵 BATCH PROCESSING")
+    print("   🎵 BATCH PROCESSING - AUDIO REACTIVE")
     print("="*60)
     print(f"\n📋 Files to process: {len(audio_files)}")
     
@@ -466,7 +755,7 @@ def process_batch(audio_files, resolution='1080p', fps=30, color_scheme='purple'
         print('─'*50)
         
         output = f"silk_{Path(audio).stem}.mp4"
-        success = create_silk_orb_video(audio, output, resolution, fps, color_scheme)
+        success = create_silk_orb_video(audio, output, resolution, fps, color_scheme, sensitivity=sensitivity)
         results.append((audio, output, success))
     
     print("\n" + "="*60)
@@ -484,20 +773,24 @@ def process_batch(audio_files, resolution='1080p', fps=30, color_scheme='purple'
 if __name__ == '__main__':
     if len(sys.argv) < 2:
         print("""
-🔮 SILK FLUID ORB VISUALIZER
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🔮 SILK VISUALIZER - AUDIO REACTIVE BEAT SYNC
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Creates beat-synced silk orb visualization like Resonation.io
+Bass → sphere pulses, Mids → flow speed, Highs → shimmer
 
 Usage: python silk_visualizer.py <audio> [options]
 
 Options:
   resolution   720p, 1080p, 2k, 4k, 4k+ (default: 1080p)
-  fps          Frame rate (default: 30, use 60 for smooth)
+  fps          Frame rate (default: 60 for smooth motion)
   color        purple, lava, ocean, golden, emerald
+  sensitivity  Audio reactivity 0.5-2.0 (default: 1.0)
 
 Examples:
   python silk_visualizer.py song.mp3
-  python silk_visualizer.py track.mp3 1080p 60 purple
-  python silk_visualizer.py audio.mp3 4k 30 lava
+  python silk_visualizer.py track.mp3 1080p 60 purple 1.2
+  python silk_visualizer.py audio.mp3 4k 60 lava 0.8
 
 Batch Processing:
   python silk_visualizer.py file1.mp3 file2.mp3 file3.mp3
@@ -514,11 +807,12 @@ Batch Processing:
         # Single file mode
         audio = audio_files[0]
         res = sys.argv[2] if len(sys.argv) > 2 and not Path(sys.argv[2]).exists() else '1080p'
-        fps = int(sys.argv[3]) if len(sys.argv) > 3 else 30
+        fps = int(sys.argv[3]) if len(sys.argv) > 3 else 60
         color = sys.argv[4] if len(sys.argv) > 4 else 'purple'
+        sensitivity = float(sys.argv[5]) if len(sys.argv) > 5 else 1.0
         
         output = f"silk_{Path(audio).stem}.mp4"
-        create_silk_orb_video(audio, output, res, fps, color)
+        create_silk_orb_video(audio, output, res, fps, color, sensitivity=sensitivity)
     else:
         print(f"❌ No valid audio files found in arguments!")
         sys.exit(1)
