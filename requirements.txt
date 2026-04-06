@@ -1,3 +1,6 @@
 numpy
 Pillow
 scipy
+tqdm
+librosa
+cupy-cuda12x; platform_system != "Darwin"
