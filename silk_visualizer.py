@@ -1749,6 +1749,17 @@ def main():
     """Main entry point"""
     parser = create_parser()
     
+    # Handle --list-colors before parsing (doesn't require audio)
+    if '--list-colors' in sys.argv:
+        print("\n🎨 Available Color Schemes:")
+        print("─" * 40)
+        for name in list_color_schemes():
+            colors = COLOR_SCHEMES[name]
+            glow = colors['glow']
+            print(f"  • {name:<12} (glow: RGB{glow})")
+        print("\n💡 Use --colors-file to load custom palettes from JSON")
+        sys.exit(0)
+    
     # Handle no arguments
     if len(sys.argv) < 2:
         parser.print_help()
@@ -1756,7 +1767,7 @@ def main():
     
     args = parser.parse_args()
     
-    # List colors and exit
+    # List colors and exit (redundant but kept for safety)
     if args.list_colors:
         print("\n🎨 Available Color Schemes:")
         print("─" * 40)
