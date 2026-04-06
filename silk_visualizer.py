@@ -1163,17 +1163,281 @@ def get_duration(audio):
     return float(r.stdout.strip())
 
 
-def create_silk_orb_video(audio, output, resolution='1080p', fps=60, color_scheme='purple', start_time=0, sensitivity=1.0):
-    """Create audio-reactive silk orb visualization with beat synchronization"""
+# ==================== CHECKPOINTING ====================
+class RenderCheckpoint:
+    """Checkpoint system for resumable rendering"""
+    
+    def __init__(self, audio_path, output_path, resolution, fps, color_scheme, sensitivity):
+        # Create unique checkpoint ID based on parameters
+        params_str = f"{audio_path}_{resolution}_{fps}_{color_scheme}_{sensitivity}"
+        self.checkpoint_id = hashlib.md5(params_str.encode()).hexdigest()[:12]
+        self.checkpoint_dir = Path(tempfile.gettempdir()) / f"silk_checkpoint_{self.checkpoint_id}"
+        self.checkpoint_file = self.checkpoint_dir / "progress.pkl"
+        self.frames_dir = self.checkpoint_dir / "frames"
+        
+    def exists(self):
+        """Check if a checkpoint exists"""
+        return self.checkpoint_file.exists()
+    
+    def load(self):
+        """Load checkpoint data"""
+        if not self.exists():
+            return None
+        try:
+            with open(self.checkpoint_file, 'rb') as f:
+                return pickle.load(f)
+        except Exception as e:
+            print(f"⚠️  Failed to load checkpoint: {e}")
+            return None
+    
+    def save(self, data):
+        """Save checkpoint data"""
+        self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        self.frames_dir.mkdir(exist_ok=True)
+        with open(self.checkpoint_file, 'wb') as f:
+            pickle.dump(data, f)
+    
+    def get_frames_dir(self):
+        """Get directory for rendered frames"""
+        self.frames_dir.mkdir(parents=True, exist_ok=True)
+        return str(self.frames_dir)
+    
+    def cleanup(self):
+        """Remove checkpoint after successful completion"""
+        try:
+            if self.checkpoint_dir.exists():
+                shutil.rmtree(self.checkpoint_dir)
+        except Exception as e:
+            print(f"⚠️  Failed to cleanup checkpoint: {e}")
+    
+    def get_completed_frames(self):
+        """Get list of already rendered frame numbers"""
+        if not self.frames_dir.exists():
+            return set()
+        completed = set()
+        for f in self.frames_dir.glob("frame_*.png"):
+            match = re.search(r'frame_(\d+)\.png', f.name)
+            if match:
+                completed.add(int(match.group(1)))
+        return completed
+
+
+# ==================== MULTIPROCESSING FRAME GENERATION ====================
+def _render_frame_worker(args):
+    """Worker function for parallel frame generation"""
+    (frame_num, w, h, base_radius, cx, cy, noise_seeds, colors_dict, fps, 
+     audio_params, output_path, particle_state) = args
+    
+    # Recreate noise engines in worker process
+    noise_engines = (
+        VectorizedNoise(seed=noise_seeds[0]),
+        VectorizedNoise(seed=noise_seeds[1]),
+        VectorizedNoise(seed=noise_seeds[2])
+    )
+    
+    # Convert colors dict back to numpy arrays
+    colors = {
+        'dark': np.array(colors_dict['dark']),
+        'mid': np.array(colors_dict['mid']),
+        'bright': np.array(colors_dict['bright']),
+        'hot': np.array(colors_dict['hot']),
+        'glow': tuple(colors_dict['glow']),
+    }
+    
+    # Generate frame
+    frame = generate_frame_vectorized(
+        frame_num, w, h, base_radius, cx, cy,
+        noise_engines, colors, fps, audio_params
+    )
+    
+    # Save frame
+    frame.save(output_path, 'PNG', compress_level=1)
+    
+    return frame_num
+
+
+def render_frames_parallel(frame_range, w, h, base_radius, cx, cy, noise_seeds, colors, 
+                          fps, audio_params_list, output_dir, num_workers=None,
+                          particle_system=None, audio_analyzer=None):
+    """Render frames in parallel using multiprocessing"""
+    
+    if num_workers is None:
+        num_workers = max(1, mp.cpu_count() - 1)
+    
+    # Convert colors to serializable format
+    colors_dict = {
+        'dark': colors['dark'].tolist(),
+        'mid': colors['mid'].tolist(),
+        'bright': colors['bright'].tolist(),
+        'hot': colors['hot'].tolist(),
+        'glow': list(colors['glow']),
+    }
+    
+    # Prepare arguments for each frame
+    tasks = []
+    for frame_num in frame_range:
+        output_path = os.path.join(output_dir, f"frame_{frame_num:06d}.png")
+        audio_params = audio_params_list[frame_num] if frame_num < len(audio_params_list) else audio_params_list[-1]
+        
+        tasks.append((
+            frame_num, w, h, base_radius, cx, cy, noise_seeds, colors_dict, fps,
+            audio_params, output_path, None  # particle_state placeholder
+        ))
+    
+    completed = []
+    
+    if num_workers > 1:
+        # Use multiprocessing for parallel rendering
+        with ProcessPoolExecutor(max_workers=num_workers) as executor:
+            if TQDM_AVAILABLE:
+                futures = {executor.submit(_render_frame_worker, task): task[0] for task in tasks}
+                with tqdm(total=len(tasks), desc="🎨 Rendering frames", unit="frame") as pbar:
+                    for future in as_completed(futures):
+                        try:
+                            frame_num = future.result()
+                            completed.append(frame_num)
+                            pbar.update(1)
+                        except Exception as e:
+                            print(f"\n⚠️  Frame {futures[future]} failed: {e}")
+            else:
+                futures = list(executor.map(_render_frame_worker, tasks))
+                completed = futures
+    else:
+        # Single-threaded fallback
+        if TQDM_AVAILABLE:
+            for task in tqdm(tasks, desc="🎨 Rendering frames", unit="frame"):
+                frame_num = _render_frame_worker(task)
+                completed.append(frame_num)
+        else:
+            for i, task in enumerate(tasks):
+                frame_num = _render_frame_worker(task)
+                completed.append(frame_num)
+                progress = (i + 1) / len(tasks) * 100
+                print(f"\r   🖼️  Frame {i + 1}/{len(tasks)} ({progress:.1f}%)", end='', flush=True)
+            print()
+    
+    return completed
+
+
+# ==================== MEMORY-OPTIMIZED STREAMING TO FFMPEG ====================
+def stream_frames_to_ffmpeg(frame_generator, total_frames, output_path, audio_path, 
+                            fps, width, height, start_time=0):
+    """Stream frames directly to FFmpeg via pipe (memory efficient)"""
+    
+    cmd = [
+        'ffmpeg', '-y',
+        '-f', 'rawvideo',
+        '-vcodec', 'rawvideo',
+        '-s', f'{width}x{height}',
+        '-pix_fmt', 'rgb24',
+        '-r', str(fps),
+        '-i', '-',  # Read from stdin
+        '-ss', str(start_time),
+        '-i', audio_path,
+        '-c:v', 'libx264',
+        '-preset', 'medium',
+        '-crf', '18',
+        '-pix_fmt', 'yuv420p',
+        '-profile:v', 'high',
+        '-level', '4.2',
+        '-c:a', 'aac',
+        '-b:a', '256k',
+        '-shortest',
+        '-movflags', '+faststart',
+        output_path
+    ]
+    
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
+    
+    try:
+        if TQDM_AVAILABLE:
+            pbar = tqdm(total=total_frames, desc="🎬 Encoding", unit="frame")
+        
+        for frame_num, frame in enumerate(frame_generator):
+            # Convert PIL image to raw bytes
+            frame_bytes = np.array(frame.convert('RGB')).tobytes()
+            proc.stdin.write(frame_bytes)
+            
+            if TQDM_AVAILABLE:
+                pbar.update(1)
+            else:
+                if frame_num % 30 == 0:
+                    progress = (frame_num + 1) / total_frames * 100
+                    print(f"\r   🎬 Encoding: {frame_num + 1}/{total_frames} ({progress:.1f}%)", end='', flush=True)
+        
+        if TQDM_AVAILABLE:
+            pbar.close()
+        else:
+            print()
+        
+        proc.stdin.close()
+        proc.wait()
+        
+        if proc.returncode != 0:
+            stderr = proc.stderr.read().decode()
+            raise FFmpegError(f"FFmpeg encoding failed: {stderr}")
+            
+        return True
+        
+    except Exception as e:
+        proc.kill()
+        raise
+
+
+def create_silk_orb_video(audio, output, resolution='1080p', fps=60, color_scheme='purple', 
+                         start_time=0, sensitivity=1.0, num_workers=None, use_gpu=False,
+                         enable_particles=True, resume=False, preview=False, config=None):
+    """
+    Create audio-reactive silk orb visualization with beat synchronization.
+    
+    Args:
+        audio: Path to audio file
+        output: Output video path
+        resolution: Resolution preset (720p, 1080p, 2k, 4k, 4k+)
+        fps: Frame rate
+        color_scheme: Color palette name
+        start_time: Start offset in audio (seconds)
+        sensitivity: Audio reactivity multiplier (0.5-2.0)
+        num_workers: Number of parallel workers (None = auto-detect)
+        use_gpu: Enable GPU acceleration if available
+        enable_particles: Enable particle system
+        resume: Resume from checkpoint if available
+        preview: Quick preview mode (lower quality, faster)
+        config: Optional config dict or path to JSON config
+    """
     
     print("\n" + "="*60)
     print("   🔮 SILK VISUALIZER - AUDIO REACTIVE 🔮")
     print("="*60 + "\n")
     
-    audio_path = Path(audio)
-    if not audio_path.exists():
-        print(f"❌ Audio '{audio}' not found!")
+    # ===== VALIDATION =====
+    try:
+        ffmpeg_version = check_ffmpeg()
+        print(f"✅ FFmpeg: {ffmpeg_version}")
+        check_ffprobe()
+    except FFmpegError as e:
+        print(f"❌ {e}")
         return False
+    
+    try:
+        audio_duration = validate_audio_file(audio)
+        print(f"✅ Audio: {Path(audio).name} ({audio_duration:.1f}s)")
+    except AudioError as e:
+        print(f"❌ {e}")
+        return False
+    
+    audio_path = Path(audio)
+    
+    # Load configuration
+    if isinstance(config, str):
+        config = load_config(config)
+    elif config is None:
+        config = DEFAULT_CONFIG
+    
+    # Load custom colors if available
+    custom_colors_path = Path(audio_path.parent) / "colors.json"
+    if custom_colors_path.exists():
+        load_custom_colors(custom_colors_path)
     
     # Resolution presets (9:10 portrait like reference)
     res_map = {
@@ -1181,68 +1445,127 @@ def create_silk_orb_video(audio, output, resolution='1080p', fps=60, color_schem
         '1080p': (1080, 1200),
         '2k': (1440, 1600),
         '4k': (2160, 2400),
-        '4k+': (3456, 3840),  # Matches reference exactly
+        '4k+': (3456, 3840),
     }
-    w, h = res_map.get(resolution, (1080, 1200))
     
+    # Preview mode: lower resolution for speed
+    if preview:
+        res_map = {k: (v[0]//2, v[1]//2) for k, v in res_map.items()}
+        fps = 30
+        print("⚡ Preview mode: reduced resolution and framerate")
+    
+    w, h = res_map.get(resolution, (1080, 1200))
     colors = COLOR_SCHEMES.get(color_scheme, COLOR_SCHEMES['purple'])
     
-    print(f"📁 Audio: {audio_path.name}")
+    print(f"\n📁 Audio: {audio_path.name}")
     print(f"📐 Resolution: {w}x{h} @ {fps}fps")
     print(f"🎨 Color Scheme: {color_scheme}")
     print(f"🎚️  Sensitivity: {sensitivity}")
+    
+    # GPU status
+    if use_gpu and GPU_AVAILABLE:
+        print(f"🚀 GPU: Enabled (CuPy)")
+    elif use_gpu:
+        print(f"⚠️  GPU: Not available, using CPU")
+        use_gpu = False
+    
+    # Worker count
+    if num_workers is None:
+        num_workers = max(1, mp.cpu_count() - 1)
+    print(f"👷 Workers: {num_workers}")
     print()
+    
+    # ===== CHECKPOINTING =====
+    checkpoint = RenderCheckpoint(str(audio_path), output, resolution, fps, color_scheme, sensitivity)
+    
+    if resume and checkpoint.exists():
+        print(f"📌 Found checkpoint, attempting to resume...")
+        checkpoint_data = checkpoint.load()
+        if checkpoint_data:
+            completed_frames = checkpoint.get_completed_frames()
+            print(f"   ✅ {len(completed_frames)} frames already rendered")
+        else:
+            completed_frames = set()
+    else:
+        completed_frames = set()
+        if checkpoint.exists():
+            checkpoint.cleanup()
+    
+    # ===== DISK SPACE CHECK =====
+    try:
+        estimated_mb = estimate_disk_usage(w, h, int(audio_duration * fps), fps)
+        free_mb = check_disk_space(Path(output).parent or Path('.'), required_mb=estimated_mb)
+        if free_mb:
+            print(f"💾 Disk: {free_mb:.0f}MB free, ~{estimated_mb:.0f}MB needed")
+    except DiskSpaceError as e:
+        print(f"❌ {e}")
+        return False
     
     # ===== AUDIO ANALYSIS =====
     try:
-        audio_analyzer = AudioAnalyzer(audio_path, fps=fps, sensitivity=sensitivity)
+        audio_analyzer = AudioAnalyzer(audio_path, fps=fps, sensitivity=sensitivity, config=config.get('audio_reactivity'))
         total_frames = audio_analyzer.total_frames
     except Exception as e:
         print(f"❌ Audio analysis failed: {e}")
         return False
     
-    print(f"⏱️  Duration: {audio_analyzer.duration:.1f}s ({total_frames} frames)")
+    print(f"\n⏱️  Duration: {audio_analyzer.duration:.1f}s ({total_frames} frames)")
+    if hasattr(audio_analyzer, 'bpm'):
+        print(f"🎵 BPM: {audio_analyzer.bpm:.1f}")
     print()
     
     # Orb parameters
     base_radius = int(min(w, h) * 0.42)
     cx, cy = w // 2, h // 2
     
-    # Create temp directory for frames
-    temp_dir = tempfile.mkdtemp(prefix='silk_frames_')
-    print(f"📂 Temp frames: {temp_dir}")
+    # Initialize particle system
+    particle_system = None
+    if enable_particles and config.get('particles', {}).get('enabled', True):
+        particle_system = ParticleSystem(w, h, config=config.get('particles'))
+        print("✨ Particles: Enabled")
+    
+    # Get frame directory (checkpoint or temp)
+    if resume and checkpoint.exists():
+        temp_dir = checkpoint.get_frames_dir()
+    else:
+        temp_dir = checkpoint.get_frames_dir()
+    
+    print(f"📂 Frames: {temp_dir}")
     
     try:
-        # Initialize noise engines (once, reused for all frames)
-        noise_engines = (
-            VectorizedNoise(seed=42),
-            VectorizedNoise(seed=137),
-            VectorizedNoise(seed=256)
+        # Noise seeds for reproducibility
+        noise_seeds = (42, 137, 256)
+        
+        # Pre-compute all audio parameters
+        print("\n📊 Pre-computing audio parameters...")
+        audio_params_list = [audio_analyzer.get_frame_params(i) for i in range(total_frames)]
+        
+        # Determine which frames need rendering
+        frames_to_render = [i for i in range(total_frames) if i not in completed_frames]
+        
+        if len(frames_to_render) < total_frames:
+            print(f"⏭️  Skipping {total_frames - len(frames_to_render)} already rendered frames")
+        
+        # Generate frames with multiprocessing
+        print(f"\n🎨 Generating {len(frames_to_render)} frames with {num_workers} workers...")
+        
+        rendered = render_frames_parallel(
+            frames_to_render, w, h, base_radius, cx, cy, noise_seeds, colors,
+            fps, audio_params_list, temp_dir, num_workers=num_workers,
+            particle_system=particle_system, audio_analyzer=audio_analyzer
         )
         
-        # Generate frames with audio reactivity
-        print("\n🎨 Generating beat-synced frames...")
+        # Save checkpoint
+        checkpoint.save({
+            'completed_frames': list(completed_frames | set(rendered)),
+            'total_frames': total_frames,
+            'params': {
+                'resolution': resolution, 'fps': fps, 'color_scheme': color_scheme,
+                'sensitivity': sensitivity
+            }
+        })
         
-        for frame_num in range(total_frames):
-            frame_path = os.path.join(temp_dir, f"frame_{frame_num:06d}.png")
-            
-            # Get audio-reactive parameters for this frame
-            audio_params = audio_analyzer.get_frame_params(frame_num)
-            
-            # Generate frame with audio reactivity
-            frame = generate_frame_vectorized(
-                frame_num, w, h, base_radius, cx, cy, 
-                noise_engines, colors, fps, audio_params
-            )
-            frame.save(frame_path, 'PNG')
-            
-            # Progress with audio debug info
-            progress = (frame_num + 1) / total_frames * 100
-            elapsed_sec = frame_num / fps
-            bass_bar = "█" * int(audio_params['bass'] * 10)
-            print(f"\r   🖼️  Frame {frame_num + 1}/{total_frames} ({progress:.1f}%) - {elapsed_sec:.1f}s |{bass_bar:<10}|", end='', flush=True)
-        
-        print("\n\n🎬 Encoding video with FFmpeg...")
+        print(f"\n🎬 Encoding video with FFmpeg...")
         
         # Combine frames with audio using FFmpeg
         cmd = [
@@ -1250,28 +1573,40 @@ def create_silk_orb_video(audio, output, resolution='1080p', fps=60, color_schem
             '-framerate', str(fps),
             '-i', os.path.join(temp_dir, 'frame_%06d.png'),
             '-ss', str(start_time),
-            '-i', audio,
+            '-i', str(audio),
             '-c:v', 'libx264',
-            '-preset', 'slow',
-            '-crf', '18',
+            '-preset', 'medium' if preview else 'slow',
+            '-crf', '23' if preview else '18',
             '-pix_fmt', 'yuv420p',
             '-profile:v', 'high',
             '-level', '4.2',
             '-c:a', 'aac',
-            '-b:a', '256k',
+            '-b:a', '192k' if preview else '256k',
             '-shortest',
             '-movflags', '+faststart',
             output
         ]
         
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        
+        if TQDM_AVAILABLE:
+            pbar = tqdm(total=total_frames, desc="📹 Encoding", unit="frame")
+            last_frame = 0
+        
         for line in proc.stdout:
             if 'frame=' in line:
                 match = re.search(r'frame=\s*(\d+)', line)
                 if match:
                     encoded = int(match.group(1))
-                    pct = min(100, encoded / total_frames * 100)
-                    print(f"\r   📹 Encoding: {encoded}/{total_frames} ({pct:.1f}%)", end='', flush=True)
+                    if TQDM_AVAILABLE:
+                        pbar.update(encoded - last_frame)
+                        last_frame = encoded
+                    else:
+                        pct = min(100, encoded / total_frames * 100)
+                        print(f"\r   📹 Encoding: {encoded}/{total_frames} ({pct:.1f}%)", end='', flush=True)
+        
+        if TQDM_AVAILABLE:
+            pbar.close()
         
         proc.wait()
         print()
@@ -1279,19 +1614,32 @@ def create_silk_orb_video(audio, output, resolution='1080p', fps=60, color_schem
         if proc.returncode == 0 and Path(output).exists():
             size = Path(output).stat().st_size / (1024 * 1024)
             print(f"\n✅ SUCCESS! {output} ({size:.1f} MB)")
+            
+            # Cleanup checkpoint on success
+            checkpoint.cleanup()
             return True
         else:
             print("❌ FFmpeg encoding failed!")
+            print("💡 Tip: Use --resume to continue from checkpoint")
             return False
             
+    except KeyboardInterrupt:
+        print(f"\n\n⚠️  Interrupted! Progress saved to checkpoint.")
+        print(f"💡 Use --resume to continue: python silk_visualizer.py {audio} --resume")
+        return False
+    except Exception as e:
+        print(f"\n❌ Error: {e}")
+        print(f"💡 Use --resume to retry from checkpoint")
+        raise
     finally:
-        # Cleanup temp frames
-        print(f"\n🧹 Cleaning up temp files...")
-        shutil.rmtree(temp_dir, ignore_errors=True)
+        if not resume:
+            # Only cleanup if not resuming
+            pass  # Keep frames for potential resume
 
 
 # ==================== BATCH PROCESSING ====================
-def process_batch(audio_files, resolution='1080p', fps=60, color_scheme='purple', sensitivity=1.0):
+def process_batch(audio_files, resolution='1080p', fps=60, color_scheme='purple', sensitivity=1.0, 
+                  num_workers=None, use_gpu=False, enable_particles=True):
     """Process multiple audio files"""
     print("\n" + "="*60)
     print("   🎵 BATCH PROCESSING - AUDIO REACTIVE")
@@ -1305,7 +1653,11 @@ def process_batch(audio_files, resolution='1080p', fps=60, color_scheme='purple'
         print('─'*50)
         
         output = f"silk_{Path(audio).stem}.mp4"
-        success = create_silk_orb_video(audio, output, resolution, fps, color_scheme, sensitivity=sensitivity)
+        success = create_silk_orb_video(
+            audio, output, resolution, fps, color_scheme, 
+            sensitivity=sensitivity, num_workers=num_workers,
+            use_gpu=use_gpu, enable_particles=enable_particles
+        )
         results.append((audio, output, success))
     
     print("\n" + "="*60)
@@ -1320,49 +1672,153 @@ def process_batch(audio_files, resolution='1080p', fps=60, color_scheme='purple'
 
 
 # ==================== CLI ====================
-if __name__ == '__main__':
-    if len(sys.argv) < 2:
-        print("""
-🔮 SILK VISUALIZER - AUDIO REACTIVE BEAT SYNC
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+def create_parser():
+    """Create argument parser with all options"""
+    parser = argparse.ArgumentParser(
+        prog='silk_visualizer',
+        description="""
+🔮 SILK FLUID ORB VISUALIZER - Audio-Reactive Beat-Synced Visualization
 
-Creates beat-synced silk orb visualization like Resonation.io
+Creates beautiful fluid silk orb animations synchronized to music.
 Bass → sphere pulses, Mids → flow speed, Highs → shimmer
-
-Usage: python silk_visualizer.py <audio> [options]
-
-Options:
-  resolution   720p, 1080p, 2k, 4k, 4k+ (default: 1080p)
-  fps          Frame rate (default: 60 for smooth motion)
-  color        purple, lava, ocean, golden, emerald
-  sensitivity  Audio reactivity 0.5-2.0 (default: 1.0)
-
+        """,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
 Examples:
-  python silk_visualizer.py song.mp3
-  python silk_visualizer.py track.mp3 1080p 60 purple 1.2
-  python silk_visualizer.py audio.mp3 4k 60 lava 0.8
+  %(prog)s song.mp3                          # Basic usage
+  %(prog)s track.mp3 -r 2k -c lava           # 2K with lava colors
+  %(prog)s audio.mp3 -r 4k --gpu             # 4K with GPU acceleration
+  %(prog)s song.mp3 --preview                # Quick preview
+  %(prog)s song.mp3 --resume                 # Resume interrupted render
+  %(prog)s *.mp3 --batch                     # Process multiple files
 
-Batch Processing:
-  python silk_visualizer.py file1.mp3 file2.mp3 file3.mp3
-""")
+Color Schemes: purple, lava, ocean, golden, emerald, volcano, cyber, sunset
+Resolutions: 720p, 1080p, 2k, 4k, 4k+
+        """
+    )
+    
+    # Positional arguments
+    parser.add_argument('audio', nargs='+', help='Audio file(s) to visualize')
+    
+    # Output options
+    parser.add_argument('-o', '--output', help='Output video path (default: silk_<audio>.mp4)')
+    
+    # Quality options
+    parser.add_argument('-r', '--resolution', default='1080p',
+                       choices=['720p', '1080p', '2k', '4k', '4k+'],
+                       help='Resolution preset (default: 1080p)')
+    parser.add_argument('--fps', type=int, default=60,
+                       help='Frame rate (default: 60)')
+    parser.add_argument('-c', '--color', '--colors', dest='color_scheme', default='purple',
+                       help=f'Color scheme (default: purple). Available: {", ".join(list_color_schemes())}')
+    parser.add_argument('-s', '--sensitivity', type=float, default=1.0,
+                       help='Audio reactivity (0.5-2.0, default: 1.0)')
+    
+    # Performance options
+    parser.add_argument('-w', '--workers', type=int, default=None,
+                       help='Number of parallel workers (default: auto-detect)')
+    parser.add_argument('--gpu', action='store_true',
+                       help='Enable GPU acceleration (requires CuPy)')
+    parser.add_argument('--no-particles', action='store_true',
+                       help='Disable particle system')
+    
+    # Workflow options
+    parser.add_argument('--preview', action='store_true',
+                       help='Quick preview mode (lower quality, faster)')
+    parser.add_argument('--resume', action='store_true',
+                       help='Resume from checkpoint if available')
+    parser.add_argument('--batch', action='store_true',
+                       help='Batch process multiple audio files')
+    parser.add_argument('--start', type=float, default=0,
+                       help='Start time offset in seconds (default: 0)')
+    
+    # Configuration
+    parser.add_argument('--config', help='Path to JSON config file')
+    parser.add_argument('--colors-file', help='Path to custom colors JSON file')
+    parser.add_argument('--list-colors', action='store_true',
+                       help='List available color schemes and exit')
+    
+    # Information
+    parser.add_argument('-v', '--version', action='version', 
+                       version='%(prog)s 2.0.0 (Enhanced with GPU, multiprocessing, particles)')
+    
+    return parser
+
+
+def main():
+    """Main entry point"""
+    parser = create_parser()
+    
+    # Handle no arguments
+    if len(sys.argv) < 2:
+        parser.print_help()
         sys.exit(1)
     
-    # Check if batch mode (multiple audio files)
-    audio_files = [f for f in sys.argv[1:] if Path(f).exists() and f.endswith(('.mp3', '.wav', '.m4a', '.aac', '.mp4', '.flac'))]
+    args = parser.parse_args()
     
-    if len(audio_files) > 1:
-        # Batch mode
-        process_batch(audio_files)
-    elif len(audio_files) == 1:
-        # Single file mode
-        audio = audio_files[0]
-        res = sys.argv[2] if len(sys.argv) > 2 and not Path(sys.argv[2]).exists() else '1080p'
-        fps = int(sys.argv[3]) if len(sys.argv) > 3 else 60
-        color = sys.argv[4] if len(sys.argv) > 4 else 'purple'
-        sensitivity = float(sys.argv[5]) if len(sys.argv) > 5 else 1.0
-        
-        output = f"silk_{Path(audio).stem}.mp4"
-        create_silk_orb_video(audio, output, res, fps, color, sensitivity=sensitivity)
+    # List colors and exit
+    if args.list_colors:
+        print("\n🎨 Available Color Schemes:")
+        print("─" * 40)
+        for name in list_color_schemes():
+            colors = COLOR_SCHEMES[name]
+            glow = colors['glow']
+            print(f"  • {name:<12} (glow: RGB{glow})")
+        print("\n💡 Use --colors-file to load custom palettes from JSON")
+        sys.exit(0)
+    
+    # Load custom colors if specified
+    if args.colors_file:
+        load_custom_colors(args.colors_file)
+    
+    # Validate color scheme
+    if args.color_scheme not in COLOR_SCHEMES:
+        print(f"❌ Unknown color scheme: {args.color_scheme}")
+        print(f"   Available: {', '.join(list_color_schemes())}")
+        sys.exit(1)
+    
+    # Filter valid audio files
+    audio_files = [f for f in args.audio if Path(f).exists()]
+    
+    if not audio_files:
+        print(f"❌ No valid audio files found!")
+        sys.exit(1)
+    
+    # Batch mode or single file
+    if args.batch or len(audio_files) > 1:
+        process_batch(
+            audio_files,
+            resolution=args.resolution,
+            fps=args.fps,
+            color_scheme=args.color_scheme,
+            sensitivity=args.sensitivity,
+            num_workers=args.workers,
+            use_gpu=args.gpu,
+            enable_particles=not args.no_particles
+        )
     else:
-        print(f"❌ No valid audio files found in arguments!")
-        sys.exit(1)
+        # Single file
+        audio = audio_files[0]
+        output = args.output or f"silk_{Path(audio).stem}.mp4"
+        
+        create_silk_orb_video(
+            audio=audio,
+            output=output,
+            resolution=args.resolution,
+            fps=args.fps,
+            color_scheme=args.color_scheme,
+            start_time=args.start,
+            sensitivity=args.sensitivity,
+            num_workers=args.workers,
+            use_gpu=args.gpu,
+            enable_particles=not args.no_particles,
+            resume=args.resume,
+            preview=args.preview,
+            config=args.config
+        )
+
+
+if __name__ == '__main__':
+    # Multiprocessing support for Windows
+    mp.freeze_support()
+    main()
