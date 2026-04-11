@@ -1,7 +1,7 @@
 # 🔮 SILK FLUID ORB VISUALIZER
 # (Working)
 # {Completed}
-# [Testing Pending] {Github
+# [Testing Pending] {Github}
 Beautiful fluid silk/lava orb visualization with organic flowing patterns and audio-reactive effects.
 
 ## ✨ Features
