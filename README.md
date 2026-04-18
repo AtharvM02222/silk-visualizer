@@ -4,7 +4,7 @@
 # [Testing Pending] {Github Codespace}
 Beautiful fluid silk/lava orb visualization with organic flowing patterns and audio-reactive effects.
 
-## ✨ Features
+## ✨ Featuress
 
 - **🎵 Audio-Reactive**: Bass → pulses, Mids → flow speed, Highs → shimmer
 - **🚀 GPU Acceleration**: Optional CuPy support for faster rendering
