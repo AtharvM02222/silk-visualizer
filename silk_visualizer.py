@@ -370,7 +370,11 @@ class AudioAnalyzer:
                     units='frames',
                     hop_length=self.samples_per_frame
                 )
-                self.bpm = float(tempo) if hasattr(tempo, '__len__') else tempo
+                # Handle both scalar and array returns from librosa
+                if hasattr(tempo, '__len__'):  # Check if array first
+                    self.bpm = float(tempo[0]) if len(tempo) > 0 else 120.0
+                else:
+                    self.bpm = float(tempo)
                 print(f"   🎵 Detected BPM: {self.bpm:.1f}")
             except Exception as e:
                 print(f"   ⚠️  BPM detection failed: {e}, using estimate")
@@ -1215,8 +1219,8 @@ class RenderCheckpoint:
         if not self.frames_dir.exists():
             return set()
         completed = set()
-        for f in self.frames_dir.glob("frame_*.png"):
-            match = re.search(r'frame_(\d+)\.png', f.name)
+        for f in self.frames_dir.glob("frame_*.jpg"):
+            match = re.search(r'frame_(\d+)\.jpg', f.name)
             if match:
                 completed.add(int(match.group(1)))
         return completed
@@ -1250,8 +1254,8 @@ def _render_frame_worker(args):
         noise_engines, colors, fps, audio_params
     )
     
-    # Save frame
-    frame.save(output_path, 'PNG', compress_level=1)
+    # Save frame (JPEG for speed: ~10x faster than PNG compression while maintaining quality)
+    frame.save(output_path, 'JPEG', quality=95)
     
     return frame_num
 
@@ -1571,7 +1575,7 @@ def create_silk_orb_video(audio, output, resolution='1080p', fps=60, color_schem
         cmd = [
             'ffmpeg', '-y',
             '-framerate', str(fps),
-            '-i', os.path.join(temp_dir, 'frame_%06d.png'),
+            '-i', os.path.join(temp_dir, 'frame_%06d.jpg'),
             '-ss', str(start_time),
             '-i', str(audio),
             '-c:v', 'libx264',
