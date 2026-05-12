@@ -1219,8 +1219,8 @@ class RenderCheckpoint:
         if not self.frames_dir.exists():
             return set()
         completed = set()
-        for f in self.frames_dir.glob("frame_*.jpg"):
-            match = re.search(r'frame_(\d+)\.jpg', f.name)
+        for f in self.frames_dir.glob("frame_*.png"):
+            match = re.search(r'frame_(\d+)\.png', f.name)
             if match:
                 completed.add(int(match.group(1)))
         return completed
@@ -1254,8 +1254,8 @@ def _render_frame_worker(args):
         noise_engines, colors, fps, audio_params
     )
     
-    # Save frame (JPEG for speed: ~10x faster than PNG compression while maintaining quality)
-    frame.save(output_path, 'JPEG', quality=95)
+    # Save frame in PNG format to preserve legacy visual output consistency
+    frame.save(output_path, 'PNG', compress_level=1)
     
     return frame_num
 
@@ -1575,7 +1575,7 @@ def create_silk_orb_video(audio, output, resolution='1080p', fps=60, color_schem
         cmd = [
             'ffmpeg', '-y',
             '-framerate', str(fps),
-            '-i', os.path.join(temp_dir, 'frame_%06d.jpg'),
+            '-i', os.path.join(temp_dir, 'frame_%06d.png'),
             '-ss', str(start_time),
             '-i', str(audio),
             '-c:v', 'libx264',
