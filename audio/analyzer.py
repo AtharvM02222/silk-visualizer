@@ -1,28 +1,46 @@
 """
-AudioAnalyzer — Load an audio file, run frequency analysis and beat detection,
-and expose per-frame feature arrays consumed by the physics engine each frame.
+AudioAnalyzer — Load audio, run frequency analysis, expose per-frame features.
 
-All heavy analysis is done once in __init__ (upfront), so the render loop
-can call get_frame(i) in O(1) time.
+Implemented with scipy + soundfile + ffmpeg only (no librosa / numba required).
+This ensures compatibility with Python 3.14+ where numba wheels are not available.
+
+Pipeline:
+  1. Load audio via soundfile (WAV/FLAC/OGG) or ffmpeg subprocess (MP3/AAC/etc.)
+  2. Compute STFT with scipy.signal.stft
+  3. Extract bass / mids / highs energy per frame from linear frequency bins
+  4. Compute RMS amplitude per frame
+  5. Compute onset strength (spectral flux)
+  6. Detect beat frames with scipy peak-finding
+  7. Normalise all features 0–1 and apply EMA smoothing
 """
 
 from __future__ import annotations
 
-import librosa
+import os
+import subprocess
+import tempfile
+from typing import Optional
+
 import numpy as np
+import soundfile as sf
+from scipy.signal import find_peaks
+from scipy.signal import stft as scipy_stft
 
 
 class AudioAnalyzer:
-    """Analyze audio and expose per-frame feature data as numpy arrays."""
+    """Load and analyse audio; expose per-frame feature arrays."""
 
     def __init__(
-        self, filepath: str, fps: int = 30, sr: int = 22050, config: dict | None = None
+        self,
+        filepath: str,
+        fps: int = 30,
+        sr: int = 22050,
+        config: Optional[dict] = None,
     ):
         self.fps = fps
         self.filepath = filepath
         cfg = config or {}
 
-        # EMA smoothing coefficients (fall back to good defaults if not in config)
         smooth_bass = cfg.get("smoothing_bass", 0.75)
         smooth_mids = cfg.get("smoothing_mids", 0.65)
         smooth_highs = cfg.get("smoothing_highs", 0.55)
@@ -32,7 +50,65 @@ class AudioAnalyzer:
             filepath, fps, sr, smooth_bass, smooth_mids, smooth_highs, smooth_rms
         )
 
-    # ── Analysis ────────────────────────────────────────────────────────────
+    # ── Audio loading ────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _load_audio(filepath: str, sr: int) -> tuple[np.ndarray, int]:
+        """
+        Load any audio file to a mono float32 waveform at sample rate `sr`.
+
+        WAV / FLAC / OGG: read directly with soundfile.
+        MP3 / AAC / M4A and anything else: decode via ffmpeg to a temp WAV.
+        """
+        ext = os.path.splitext(filepath)[1].lower()
+        sf_formats = {".wav", ".flac", ".ogg", ".aiff", ".aif"}
+
+        if ext in sf_formats:
+            y, file_sr = sf.read(filepath, dtype="float32", always_2d=False)
+        else:
+            # Decode with ffmpeg → temp PCM WAV
+            tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+            tmp_path = tmp.name
+            tmp.close()
+            try:
+                result = subprocess.run(
+                    [
+                        "ffmpeg",
+                        "-y",
+                        "-i",
+                        filepath,
+                        "-ar",
+                        str(sr),
+                        "-ac",
+                        "1",
+                        "-f",
+                        "wav",
+                        tmp_path,
+                    ],
+                    capture_output=True,
+                    timeout=120,
+                )
+                if result.returncode != 0:
+                    raise RuntimeError(
+                        f"ffmpeg failed to decode {filepath}:\n"
+                        + result.stderr.decode("utf-8", errors="replace")[-400:]
+                    )
+                y, file_sr = sf.read(tmp_path, dtype="float32", always_2d=False)
+            finally:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+
+        # Ensure mono
+        if y.ndim > 1:
+            y = y.mean(axis=1)
+
+        # Resample if needed
+        if file_sr != sr:
+            y = _resample(y, file_sr, sr)
+
+        return y.astype(np.float32), sr
+
+    # ── Analysis ─────────────────────────────────────────────────────────────
 
     def _analyze(
         self,
@@ -44,85 +120,110 @@ class AudioAnalyzer:
         smooth_highs: float,
         smooth_rms: float,
     ) -> None:
-        # 1. Load audio (resampled to sr, mono)
-        y, sr = librosa.load(filepath, sr=sr, mono=True)
+        y, sr = self._load_audio(filepath, sr)
         self.sr = sr
 
-        # 2. Hop length = samples per video frame
-        hop_length = sr // fps
+        hop_length = sr // fps  # samples per video frame
+        n_fft = 2048
 
-        # 3. Mel spectrogram (128 bands, better perceptual accuracy than raw FFT)
-        mel = librosa.feature.melspectrogram(
-            y=y, sr=sr, n_fft=2048, hop_length=hop_length, n_mels=128
+        # ── STFT ────────────────────────────────────────────────────────────
+        # scipy.signal.stft returns (freqs, time, complex coefficients)
+        # shape of Zxx: (n_fft//2 + 1, n_time_steps)
+        _freqs, _times, Zxx = scipy_stft(
+            y,
+            fs=sr,
+            nperseg=n_fft,
+            noverlap=n_fft - hop_length,
+            boundary=None,
+            padded=False,
         )
-        # shape: (128, n_frames)
+        magnitude = np.abs(Zxx).astype(np.float32)  # (n_freqs, n_stft_frames)
 
-        # 4. Beat tracking
-        _tempo, beat_frames = librosa.beat.beat_track(y=y, sr=sr, hop_length=hop_length)
+        n_frames = len(y) // hop_length  # target frame count
 
-        # 5. Onset strength envelope
-        onset_env = librosa.onset.onset_strength(y=y, sr=sr, hop_length=hop_length)
+        # ── Frequency bands (linear STFT bins) ──────────────────────────────
+        # Bin k corresponds to frequency k * sr / n_fft
+        freq_res = sr / n_fft
+        bass_end = max(1, int(200 / freq_res))  # 0 → ~200 Hz
+        mids_end = max(bass_end + 1, int(2000 / freq_res))  # ~200 → ~2000 Hz
 
-        # 6. RMS amplitude
-        rms_raw = librosa.feature.rms(y=y, hop_length=hop_length)[0]
+        bass_raw = magnitude[:bass_end, :].mean(axis=0)
+        mids_raw = magnitude[bass_end:mids_end, :].mean(axis=0)
+        highs_raw = magnitude[mids_end:, :].mean(axis=0)
 
-        # 7. Band energies from mel spectrogram
-        #    Bass:  bands  0–10  → ~20–200 Hz
-        #    Mids:  bands 10–60  → ~200–2000 Hz
-        #    Highs: bands 60–128 → ~2000–16 000 Hz
-        bass_raw = mel[0:10, :].mean(axis=0)
-        mids_raw = mel[10:60, :].mean(axis=0)
-        highs_raw = mel[60:, :].mean(axis=0)
+        # ── RMS per frame ────────────────────────────────────────────────────
+        n_rms_frames = len(y) // hop_length
+        rms_raw = np.array(
+            [
+                float(np.sqrt(np.mean(y[i * hop_length : (i + 1) * hop_length] ** 2)))
+                for i in range(n_rms_frames)
+            ],
+            dtype=np.float32,
+        )
 
-        # 8. Determine consistent n_frames (trim all arrays to shortest)
+        # ── Onset strength (spectral flux — sum of positive magnitude changes) ──
+        if magnitude.shape[1] > 1:
+            flux = np.maximum(np.diff(magnitude, axis=1), 0).sum(axis=0)
+            onset_raw = np.concatenate([[0.0], flux]).astype(np.float32)
+        else:
+            onset_raw = np.zeros(magnitude.shape[1], dtype=np.float32)
+
+        # ── Trim all arrays to n_frames ──────────────────────────────────────
         n_frames = min(
-            len(rms_raw),
-            len(onset_env),
+            n_frames,
             bass_raw.shape[0],
             mids_raw.shape[0],
             highs_raw.shape[0],
+            len(rms_raw),
+            len(onset_raw),
         )
-
-        rms_raw = rms_raw[:n_frames]
         bass_raw = bass_raw[:n_frames]
         mids_raw = mids_raw[:n_frames]
         highs_raw = highs_raw[:n_frames]
-        onset_env = onset_env[:n_frames]
+        rms_raw = rms_raw[:n_frames]
+        onset_raw = onset_raw[:n_frames]
 
-        # 9. Normalize each feature 0–1 (robust: clip at 97th percentile)
+        # ── Normalise 0–1 ────────────────────────────────────────────────────
         bass_n = self._normalize(bass_raw)
         mids_n = self._normalize(mids_raw)
         highs_n = self._normalize(highs_raw)
         rms_n = self._normalize(rms_raw)
-        onset_n = self._normalize(onset_env)
+        onset_n = self._normalize(onset_raw)
 
-        # 10. Apply exponential moving average (EMA) smoothing
+        # ── EMA smoothing ────────────────────────────────────────────────────
         self.bass = self._smooth(bass_n, smooth_bass)
         self.mids = self._smooth(mids_n, smooth_mids)
         self.highs = self._smooth(highs_n, smooth_highs)
         self.rms = self._smooth(rms_n, smooth_rms)
-        self.onset = onset_n  # onset kept unsmoothed for snappy beat response
+        self.onset = onset_n  # keep onset unsmoothed for snappy beat response
 
-        # 11. Boolean beat array
+        # ── Beat detection (peak-finding on onset) ───────────────────────────
+        # Minimum distance between beats: 0.25 s at the target fps
+        min_beat_dist = max(1, int(0.25 * fps))
+        peaks, _ = find_peaks(
+            onset_n,
+            distance=min_beat_dist,
+            prominence=0.15,
+            height=0.10,
+        )
         is_beat = np.zeros(n_frames, dtype=bool)
-        valid = beat_frames[beat_frames < n_frames]
-        is_beat[valid] = True
+        is_beat[peaks[peaks < n_frames]] = True
         self.is_beat = is_beat
 
         self.n_frames = n_frames
         self.duration = float(len(y)) / sr
 
-    # ── Helpers ─────────────────────────────────────────────────────────────
+    # ── Helpers ──────────────────────────────────────────────────────────────
 
     @staticmethod
     def _normalize(arr: np.ndarray, percentile: float = 97.0) -> np.ndarray:
-        """Clip at 97th percentile, then scale 0–1 to avoid outliers dominating."""
+        """Clip at the 97th percentile then scale 0–1 to avoid outliers dominating."""
         peak = np.percentile(arr, percentile)
-        return np.clip(arr / (peak + 1e-8), 0.0, 1.0)
+        return np.clip(arr / (peak + 1e-8), 0.0, 1.0).astype(np.float32)
 
     @staticmethod
     def _smooth(arr: np.ndarray, alpha: float) -> np.ndarray:
-        """Exponential moving average.  alpha=0 → raw values,  alpha=0.9 → heavy smoothing."""
+        """Exponential moving average.  alpha=0 → no smoothing,  0.9 → heavy."""
         if alpha <= 0.0:
             return arr.copy()
         out = np.empty_like(arr, dtype=np.float32)
@@ -131,10 +232,10 @@ class AudioAnalyzer:
             out[i] = alpha * out[i - 1] + (1.0 - alpha) * arr[i]
         return out
 
-    # ── Public API ──────────────────────────────────────────────────────────
+    # ── Public API ───────────────────────────────────────────────────────────
 
     def get_frame(self, frame_idx: int) -> dict:
-        """Return a dict of audio features for the given frame index (safe, clamped)."""
+        """Return audio feature dict for the given frame (safe, index clamped)."""
         idx = max(0, min(frame_idx, self.n_frames - 1))
         return {
             "rms": float(self.rms[idx]),
@@ -144,3 +245,18 @@ class AudioAnalyzer:
             "onset": float(self.onset[idx]),
             "is_beat": bool(self.is_beat[idx]),
         }
+
+
+# ── Module-level helpers ──────────────────────────────────────────────────────
+
+
+def _resample(y: np.ndarray, orig_sr: int, target_sr: int) -> np.ndarray:
+    """Simple linear-interpolation resample (good enough for visualisation)."""
+    if orig_sr == target_sr:
+        return y
+    target_len = int(len(y) * target_sr / orig_sr)
+    return np.interp(
+        np.linspace(0, len(y) - 1, target_len),
+        np.arange(len(y)),
+        y,
+    ).astype(np.float32)
