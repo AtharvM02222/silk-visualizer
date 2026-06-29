@@ -1,4 +1,3 @@
-librosa>=0.10.0          # Audio analysis, FFT, beat tracking
 numpy>=1.24.0            # Math everywhere
 pygame>=2.5.0            # Real-time rendering window + surface drawing
 opencv-python>=4.8.0     # Video frame writing
