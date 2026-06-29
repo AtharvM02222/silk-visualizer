@@ -1,0 +1,40 @@
+# Silk Audio Visualizer — Default Configuration
+# All parameters can be overridden via --config path/to/config.yaml
+
+# ── Canvas ────────────────────────────────────────────────────────────────────
+background_color: [5, 5, 10]       # Near-black blue tint
+
+# ── Strand Physics ────────────────────────────────────────────────────────────
+n_strands: 10                       # Number of silk strands (4–12 recommended)
+n_particles: 24                     # Particles per strand (15–30)
+segment_length: 9.0                 # Rest length per spring in pixels (8–12)
+stiffness: 0.82                     # Spring stiffness 0.0–1.0
+damping: 0.975                      # Verlet velocity damping per frame (0.95–0.99)
+constraint_iterations: 6            # Spring solver passes per frame (5–8)
+
+# ── Audio-Driven Forces ───────────────────────────────────────────────────────
+bass_force_mult: 900.0              # Bass energy → big sweeping strand force
+mids_force_mult: 250.0              # Mids energy → additional wind force
+beat_burst_mult: 1400.0             # Beat onset → radial burst outward
+jitter_mult: 55.0                   # Highs → random tip jitter
+min_force_baseline: 50.0            # Keeps strands moving during silence
+
+# ── Center Sphere ─────────────────────────────────────────────────────────────
+sphere_base_radius: 28.0            # Base sphere radius in pixels (20–40)
+sphere_pulse_scale: 0.45            # Bass pulse multiplier
+
+# ── Color ─────────────────────────────────────────────────────────────────────
+palette: "cool"                     # warm | cool | neon | mono
+hue_drift_speed: 0.0002             # Global hue shift per frame (0.0001–0.0005)
+
+# ── Rendering ─────────────────────────────────────────────────────────────────
+trail_decay: 0.88                   # Frame fade multiplier (0.80=long, 0.95=short)
+strand_base_width: 3                # Line width at root in pixels (tapers to 1)
+bloom_threshold: 160                # Pixel brightness above which bloom applies (0–255)
+bloom_blur: 18                      # Gaussian blur radius for bloom (pixels)
+
+# ── Audio Smoothing (exponential moving average) ──────────────────────────────
+smoothing_bass: 0.75
+smoothing_mids: 0.65
+smoothing_highs: 0.55
+smoothing_rms: 0.70
